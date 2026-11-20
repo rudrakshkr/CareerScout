@@ -15,7 +15,7 @@
     "dev:server": "npm run dev --workspace @career-scout/server",
     "dev:dashboard": "npm run dev --workspace @career-scout/dashboard",
     "build": "npm run build --workspace=@career-scout/database && npm run build --workspace=@career-scout/server && npm run build --workspace=@career-scout/dashboard",
-    "typecheck": "npm run typecheck --workspace=@career-scout/database && npm run typecheck --workspace=@career-scout/server && npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspace=@career-scout/database && npm run typecheck --workspace=@career-scout/server && npm run typecheck --workspace=@career-scout/dashboard",
     "db:generate": "npm run generate --workspace=@career-scout/database",
     "db:migrate": "npm run migrate --workspace=@career-scout/database",
     "db:studio": "npm run studio --workspace=@career-scout/database"
