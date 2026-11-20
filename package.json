@@ -1,0 +1,23 @@
+{
+  "name": "career-scout",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"npm:dev:server\" \"npm:dev:dashboard\"",
+    "dev:server": "npm run dev --workspace @career-scout/server",
+    "dev:dashboard": "npm run dev --workspace @career-scout/dashboard",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "10.0.7"
+  }
+}

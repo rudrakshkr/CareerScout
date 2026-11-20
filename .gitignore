@@ -1,0 +1,31 @@
+# Dependencies and build output
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+coverage/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local application data (never commit profiles, resumes, jobs DBs or credentials)
+data/
+.local-job-agent/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# Logs and temporary files
+logs/
+*.log
+.tmp/
+.temp/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
