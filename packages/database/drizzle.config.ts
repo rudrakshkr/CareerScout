@@ -20,7 +20,7 @@ mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
 export default defineConfig({
   dialect: 'sqlite',
   schema: resolve(packageDirectory, 'src/schema/index.ts'),
-  out: resolve(packageDirectory, 'drizzle'),
+  out: './drizzle',
   dbCredentials: {
     url: databasePath,
   },

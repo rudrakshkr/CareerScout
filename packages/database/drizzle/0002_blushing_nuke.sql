@@ -1,0 +1,2 @@
+DROP INDEX `resume_documents_user_primary_idx`;--> statement-breakpoint
+CREATE UNIQUE INDEX `resume_documents_one_primary_per_user_unique` ON `resume_documents` (`user_id`) WHERE "resume_documents"."is_primary" = 1;

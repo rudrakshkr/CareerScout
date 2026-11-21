@@ -1,6 +1,7 @@
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import type { AppDatabase } from '@career-scout/database';
 import { createAuthRouter } from './routes/auth.js';
+import { createProfileRouter } from './routes/profile.js';
 
 export interface AppOptions {
   db: AppDatabase;
@@ -29,6 +30,7 @@ export function createApp(options: AppOptions): Express {
   });
 
   app.use('/api/auth', createAuthRouter(options.db, { secure: options.cookieSecure }));
+  app.use('/api/profile', createProfileRouter(options.db));
 
   app.use((_request: Request, response: Response) => {
     response.status(404).json({ error: 'Not found' });

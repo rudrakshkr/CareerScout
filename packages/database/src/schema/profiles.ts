@@ -14,9 +14,22 @@ export const profiles = sqliteTable('profiles', {
   linkedinUrl: text('linkedin_url'),
   githubUrl: text('github_url'),
   currentTitle: text('current_title'),
+  // Retained for compatibility with the first profile schema. Education entries
+  // are now the source of truth for users with multiple qualifications.
   educationLevel: text('education_level'),
   institution: text('institution'),
   graduationYear: integer('graduation_year'),
+  onboardingStatus: text('onboarding_status', {
+    enum: ['not_started', 'in_progress', 'completed'],
+  })
+    .notNull()
+    .default('not_started'),
+  onboardingCurrentStep: text('onboarding_current_step', {
+    enum: ['personal', 'education', 'experience', 'projects', 'skills', 'preferences', 'resume'],
+  })
+    .notNull()
+    .default('personal'),
+  onboardingCompletedAt: integer('onboarding_completed_at', { mode: 'timestamp' }),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .default(sql`(unixepoch())`),
