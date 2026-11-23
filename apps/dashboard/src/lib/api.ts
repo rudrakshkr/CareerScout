@@ -20,6 +20,9 @@ export interface ApiProfile {
   graduationYear: number | null;
   createdAt: string;
   updatedAt: string;
+  onboardingStatus?: 'not_started' | 'in_progress' | 'completed';
+  onboardingCurrentStep?: 'personal' | 'education' | 'experience' | 'projects' | 'skills' | 'preferences' | 'resume';
+  onboardingCompletedAt?: string | null;
 }
 
 interface UserResponse {
@@ -40,7 +43,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
 

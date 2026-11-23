@@ -85,6 +85,7 @@ function parseInteger(body: Body, key: string, min: number, max: number): Parsed
 function parseReal(body: Body, key: string, min: number, max: number): Parsed<number> {
   if (!Object.hasOwn(body, key)) return { ok: true, present: false, value: null };
   const value = body[key];
+  if (value === null) return { ok: true, present: true, value: null };
   return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
     ? { ok: true, present: true, value }
     : { ok: false, present: true, value: null };
