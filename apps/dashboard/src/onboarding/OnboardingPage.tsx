@@ -19,6 +19,7 @@ import {
   type SkillInput,
 } from './onboardingApi';
 import './onboarding.css';
+import ResumeManager from './ResumeManager';
 
 type StepId = 'personal' | 'education' | 'experience' | 'projects' | 'skills' | 'preferences' | 'resume' | 'review';
 type PersistedStep = Exclude<StepId, 'review'>;
@@ -30,7 +31,7 @@ const steps: Array<{ id: StepId; title: string; detail: string }> = [
   { id: 'projects', title: 'Projects', detail: 'Things you have built' },
   { id: 'skills', title: 'Skills', detail: 'What you can work with' },
   { id: 'preferences', title: 'Job preferences', detail: 'What you are looking for' },
-  { id: 'resume', title: 'Resume', detail: 'Add a resume later' },
+  { id: 'resume', title: 'Resume', detail: 'Upload and review your CV' },
   { id: 'review', title: 'Review profile', detail: 'Check before finishing' },
 ];
 
@@ -568,12 +569,8 @@ export function OnboardingPage({ user, onComplete }: { user: ApiUser; onComplete
 
   function renderResume() {
     return <>
-      <div className="onboarding-section-intro"><span className="onboarding-step-kicker">STEP 07 / 08</span><h2>Your resume, when you're ready.</h2><p>A resume helps CareerScout prepare tailored applications, but you don't need one to finish setting up your profile.</p></div>
-      <div className="onboarding-resume-card">
-        <div className="onboarding-resume-icon"><FileText size={25} /></div>
-        <div><strong>Resume upload is coming next</strong><p>The local file upload, document validation and resume fact-review workflow will be added as a separate feature. Nothing will be uploaded to a third-party service as part of this step.</p><span className="onboarding-optional-tag">OPTIONAL · SKIP FOR NOW</span></div>
-      </div>
-      {data?.resumes.length ? <div className="onboarding-entry-list">{data.resumes.map((resume) => <article className="onboarding-entry-card" key={resume.id}><div className="onboarding-entry-symbol"><FileText size={18} /></div><div className="onboarding-entry-copy"><strong>{resume.originalFilename}</strong><span>{resume.processingStatus.replaceAll('_', ' ')}</span></div>{resume.isPrimary && <span className="onboarding-ready-tag">Primary</span>}</article>)}</div> : null}
+      <div className="onboarding-section-intro"><span className="onboarding-step-kicker">STEP 07 / 08</span><h2>Add your resume.</h2><p>Keep your resume on this device. CareerScout can extract its text for review, but it will not change your profile facts without your approval.</p></div>
+      <ResumeManager />
     </>;
   }
 

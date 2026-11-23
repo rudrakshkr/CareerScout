@@ -1,0 +1,56 @@
+.resume-manager { margin-top: 20px; display: flex; flex-direction: column; gap: 14px; }
+.resume-manager-upload { padding: 17px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid #dce9df; border-radius: 10px; background: #f8fbf8; }
+.resume-manager-upload-copy { min-width: 0; display: flex; align-items: center; gap: 12px; }
+.resume-manager-upload-icon, .resume-manager-file-icon { flex: 0 0 40px; width: 40px; height: 40px; display: grid; place-items: center; border-radius: 9px; color: #317653; background: #e8f3eb; }
+.resume-manager-upload-copy strong { color: #345443; font-size: 12px; font-weight: 700; }
+.resume-manager-upload-copy p { margin: 4px 0 0; color: #829188; font-size: 10px; line-height: 1.5; }
+.resume-manager-upload-controls { display: flex; align-items: center; gap: 8px; }
+.resume-manager-choose, .resume-manager-upload-button { min-height: 34px; padding: 0 11px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid #dce7df; border-radius: 7px; color: #496253; background: #fff; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
+.resume-manager-file-input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.resume-manager-file-input:focus-visible + .resume-manager-upload-button { outline: 2px solid #317653; outline-offset: 2px; }
+.resume-manager-upload-button { border-color: #286c48; color: #fff; background: #286c48; }
+.resume-manager-upload-button:disabled, .resume-manager-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.resume-manager-selected-file { grid-column: 1 / -1; min-width: 0; padding: 8px 10px; display: flex; align-items: center; gap: 8px; border: 1px solid #e4ece6; border-radius: 7px; color: #52695b; background: #fff; font-size: 10px; }
+.resume-manager-selected-file span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-manager-selected-file small { margin-left: auto; color: #8a9990; white-space: nowrap; }
+.resume-manager-selected-file button, .resume-manager-message button { padding: 2px; display: inline-grid; place-items: center; border: 0; color: inherit; background: transparent; cursor: pointer; }
+.resume-manager-message { padding: 9px 11px; display: flex; align-items: center; gap: 8px; border-radius: 7px; font-size: 10px; line-height: 1.5; }
+.resume-manager-message button { margin-left: auto; flex: 0 0 auto; }
+.resume-manager-message.error { color: #a13f3f; background: #fff3f1; }
+.resume-manager-message.success { color: #3f7552; background: #eff8f1; }
+.resume-manager-list-heading { margin-top: 3px; display: flex; align-items: center; justify-content: space-between; }
+.resume-manager-list-heading h3 { margin: 0; color: #354f40; font-size: 12px; font-weight: 700; }
+.resume-manager-list-heading p { margin: 3px 0 0; color: #8b9990; font-size: 9px; }
+.resume-manager-empty { min-height: 125px; padding: 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #dce8df; border-radius: 9px; color: #8a9b90; background: #fbfdfb; text-align: center; }
+.resume-manager-empty strong { color: #526a5b; font-size: 11px; }
+.resume-manager-empty span { font-size: 9px; }
+.resume-manager-list { display: flex; flex-direction: column; gap: 9px; }
+.resume-manager-item { position: relative; padding: 13px; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: start; gap: 11px; border: 1px solid #e6ede8; border-radius: 9px; background: #fff; }
+.resume-manager-file-icon { width: 38px; height: 38px; flex-basis: 38px; }
+.resume-manager-file-details { min-width: 0; }
+.resume-manager-file-title { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.resume-manager-file-title > strong { max-width: 100%; overflow: hidden; color: #3d5547; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.resume-manager-primary { padding: 3px 6px; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px; color: #4d805e; background: #edf6ef; font-size: 8px; font-weight: 700; }
+.resume-manager-file-details > span { margin-top: 4px; display: block; color: #8b9990; font-size: 9px; }
+.resume-manager-file-details > small { margin-top: 6px; display: block; color: #75887b; font-size: 9px; }
+.resume-manager-file-details > small.review { color: #8a6d36; }
+.resume-manager-file-details > small.failed, .resume-manager-file-details > small.resume-manager-processing-error { color: #a05b4b; }
+.resume-manager-actions { margin-top: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 13px; }
+.resume-manager-actions button, .resume-manager-actions a { padding: 0; display: inline-flex; align-items: center; gap: 4px; border: 0; color: #567360; background: transparent; font: inherit; font-size: 9px; text-decoration: none; cursor: pointer; }
+.resume-manager-actions button.danger { color: #a45c51; }
+.resume-manager-item-spinner { color: #6c8e77; }
+.resume-manager-preview { grid-column: 1 / -1; min-width: 0; padding-top: 10px; border-top: 1px solid #edf1ee; }
+.resume-manager-preview > div { display: flex; flex-direction: column; gap: 3px; }
+.resume-manager-preview strong { color: #405b49; font-size: 10px; }
+.resume-manager-preview span { color: #8b9990; font-size: 9px; }
+.resume-manager-preview pre { max-height: 280px; margin: 9px 0 0; padding: 11px; overflow: auto; border: 1px solid #edf1ee; border-radius: 6px; color: #586b5e; background: #fafcfa; font: 10px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.resume-manager-spin { animation: resume-manager-rotate 1s linear infinite; }
+@keyframes resume-manager-rotate { to { transform: rotate(360deg); } }
+@media (max-width: 640px) {
+  .resume-manager-upload { grid-template-columns: minmax(0, 1fr); }
+  .resume-manager-upload-controls { justify-content: flex-start; }
+  .resume-manager-item { grid-template-columns: 34px minmax(0, 1fr); gap: 9px; }
+  .resume-manager-file-icon { width: 34px; height: 34px; flex-basis: 34px; }
+  .resume-manager-item-spinner { position: absolute; top: 14px; right: 13px; }
+  .resume-manager-file-title { padding-right: 18px; }
+}

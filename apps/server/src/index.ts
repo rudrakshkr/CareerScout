@@ -1,4 +1,5 @@
 import { config } from 'dotenv';
+import { mkdirSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDatabase } from '@career-scout/database';
@@ -11,6 +12,17 @@ config({ path: resolve(repositoryRoot, '.env') });
 const port = Number.parseInt(process.env.PORT ?? '3001', 10);
 const host = process.env.HOST ?? '127.0.0.1';
 const configuredDatabasePath = process.env.DB_FILE_NAME ?? '.local-job-agent/career-scout.sqlite';
+const configuredResumeStorageDir = process.env.RESUME_STORAGE_DIR ?? '.local-job-agent/resumes';
+const resumeStorageRoot = isAbsolute(configuredResumeStorageDir)
+  ? configuredResumeStorageDir
+  : resolve(repositoryRoot, configuredResumeStorageDir);
+mkdirSync(resumeStorageRoot, { recursive: true, mode: 0o700 });
+const resumeStoragePermissions = statSync(resumeStorageRoot).mode & 0o777;
+if ((resumeStoragePermissions & 0o077) !== 0) {
+  throw new Error(
+    `Resume storage directory must have owner-only permissions (0700). Run chmod 700 "${resumeStorageRoot}" and restart CareerScout.`,
+  );
+}
 const databasePath = configuredDatabasePath === ':memory:'
   ? ':memory:'
   : isAbsolute(configuredDatabasePath)
@@ -40,7 +52,7 @@ if (missingTables.length > 0) {
   );
 }
 
-const app = createApp({ db: connection.db, cookieSecure });
+const app = createApp({ db: connection.db, cookieSecure, resumeStorageRoot });
 const server = app.listen(port, host, () => {
   console.log(`CareerScout API listening at http://${host}:${port}`);
   console.log(`CareerScout database: ${databasePath}`);

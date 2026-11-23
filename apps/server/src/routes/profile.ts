@@ -195,6 +195,7 @@ export function createProfileRouter(db: AppDatabase): Router {
       fileSizeBytes: resumeDocuments.fileSizeBytes,
       isPrimary: resumeDocuments.isPrimary,
       processingStatus: resumeDocuments.processingStatus,
+      processingError: resumeDocuments.processingError,
       uploadedAt: resumeDocuments.uploadedAt,
       updatedAt: resumeDocuments.updatedAt,
     }).from(resumeDocuments).where(eq(resumeDocuments.userId, userId)).orderBy(asc(resumeDocuments.uploadedAt)).all();

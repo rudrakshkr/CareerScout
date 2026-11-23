@@ -2,10 +2,13 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import type { AppDatabase } from '@career-scout/database';
 import { createAuthRouter } from './routes/auth.js';
 import { createProfileRouter } from './routes/profile.js';
+import { createResumeRouter } from './routes/resumes.js';
+import { resolve } from 'node:path';
 
 export interface AppOptions {
   db: AppDatabase;
   cookieSecure: boolean;
+  resumeStorageRoot?: string;
 }
 
 export function createApp(options: AppOptions): Express {
@@ -31,6 +34,10 @@ export function createApp(options: AppOptions): Express {
 
   app.use('/api/auth', createAuthRouter(options.db, { secure: options.cookieSecure }));
   app.use('/api/profile', createProfileRouter(options.db));
+  app.use('/api/resumes', createResumeRouter(
+    options.db,
+    options.resumeStorageRoot ?? resolve(process.cwd(), '.local-job-agent/resumes'),
+  ));
 
   app.use((_request: Request, response: Response) => {
     response.status(404).json({ error: 'Not found' });
