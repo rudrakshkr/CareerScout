@@ -17,12 +17,14 @@ import {
   Users,
   Zap,
 } from 'lucide-react';
+import ResumeManager from './onboarding/ResumeManager';
 
 type Section =
   | 'Overview'
   | 'Discover jobs'
   | 'Companies'
   | 'People & contacts'
+  | 'Resumes'
   | 'Applications'
   | 'Outreach drafts'
   | 'Research activity'
@@ -44,6 +46,7 @@ const primaryNavigation: { label: Section; icon: typeof LayoutDashboard }[] = [
   { label: 'Discover jobs', icon: Search },
   { label: 'Companies', icon: Building2 },
   { label: 'People & contacts', icon: Users },
+  { label: 'Resumes', icon: FileText },
 ];
 
 const workflowNavigation: { label: Section; icon: typeof LayoutDashboard }[] = [
@@ -57,6 +60,7 @@ const sectionDescriptions: Record<Section, string> = {
   'Discover jobs': 'Search results from your connected sources will appear here.',
   Companies: 'Keep track of companies, career pages and hiring activity.',
   'People & contacts': 'Review source-backed recruiter and hiring-team research.',
+  Resumes: 'Manage your resumes, review extracted text and choose the primary document.',
   Applications: 'Manage opportunities you have chosen to pursue.',
   'Outreach drafts': 'Review personalized messages before you send anything.',
   'Research activity': 'Monitor source runs, processing queues and errors.',
@@ -270,6 +274,16 @@ function Dashboard({ user, onLogout }: DashboardProps) {
                 </div>
               </section>
             </>
+          ) : activeSection === 'Resumes' ? (
+            <section className="panel resume-dashboard-panel">
+              <div className="panel-heading">
+                <div>
+                  <span className="panel-kicker">PROFILE DOCUMENTS</span>
+                  <h2>Resume library</h2>
+                </div>
+              </div>
+              <ResumeManager />
+            </section>
           ) : (
             <section className="panel placeholder-panel">
               <div className="empty-icon"><Sparkles size={22} /></div>
