@@ -55,16 +55,89 @@ function identifyFile(file: Express.Multer.File): { extension: 'pdf' | 'docx'; m
   return null;
 }
 
+function decodeHtmlText(value: string): string {
+  return value
+    .replace(/&nbsp;/giu, ' ')
+    .replace(/&amp;/giu, '&')
+    .replace(/&quot;/giu, '"')
+    .replace(/&#39;|&apos;/giu, "'")
+    .replace(/&lt;/giu, '<')
+    .replace(/&gt;/giu, '>')
+    .replace(/&#(\d+);/gu, (_match, decimal: string) => String.fromCodePoint(Number(decimal)))
+    .replace(/&#x([\da-f]+);/giu, (_match, hex: string) => String.fromCodePoint(parseInt(hex, 16)));
+}
+
+function htmlToTextWithLinks(html: string): string {
+  const withInlineLinks = html.replace(
+    /<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/giu,
+    (_match, _quote: string, rawHref: string, rawLabel: string) => {
+      const href = decodeHtmlText(rawHref).trim();
+      const label = decodeHtmlText(rawLabel.replace(/<[^>]*>/gu, ' ')).replace(/\s+/gu, ' ').trim();
+      if (/^mailto:/iu.test(href)) {
+        const email = href.replace(/^mailto:/iu, '').trim();
+        return label && label.includes('@') ? label : email || label;
+      }
+      if (/^tel:/iu.test(href)) {
+        const phone = href.replace(/^tel:/iu, '').trim();
+        return label && /\d{7,}/u.test(label.replace(/\D/gu, '')) ? label : phone || label;
+      }
+      try {
+        const parsed = new URL(href);
+        if (!['http:', 'https:'].includes(parsed.protocol)) return label;
+        if (!label) return parsed.href;
+        if (label.toLowerCase().includes(parsed.hostname.toLowerCase())) return label;
+        return `[${label}](${parsed.href})`;
+      } catch {
+        return label;
+      }
+    },
+  );
+  return decodeHtmlText(
+    withInlineLinks
+      .replace(/<br\s*\/?>/giu, '\n')
+      .replace(/<li\b[^>]*>/giu, '\n• ')
+      .replace(/<\/(?:td|th)>/giu, ' | ')
+      .replace(/<\/(?:p|h[1-6]|li|div|tr|table|ul|ol|section)>/giu, '\n')
+      .replace(/<[^>]*>/gu, ' '),
+  )
+    .replace(/[ \t]+\|\s*\n/gu, '\n')
+    .replace(/[ \t]+\n/gu, '\n')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+}
+
+function cleanExtractedText(raw: string): string {
+  return raw
+    .replace(/\u0000/gu, '')
+    .replace(/\r\n?/gu, '\n')
+    .split('\n')
+    .filter((line) => !/^\s*(?:--\s*\d+\s+of\s+\d+\s*--|page\s+\d+\s+of\s+\d+)\s*$/iu.test(line))
+    .join('\n')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim()
+    .slice(0, MAX_EXTRACTED_CHARACTERS);
+}
+
 async function extractText(buffer: Buffer, extension: 'pdf' | 'docx'): Promise<string> {
   if (extension === 'docx') {
-    const result = await mammoth.extractRawText({ buffer });
-    return result.value;
+    const result = await mammoth.convertToHtml({ buffer });
+    const text = cleanExtractedText(htmlToTextWithLinks(result.value));
+    if (text) return text;
+    const fallback = await mammoth.extractRawText({ buffer });
+    return cleanExtractedText(fallback.value);
   }
 
   const parser = new PDFParse({ data: buffer });
   try {
-    const result = await parser.getText();
-    return result.text;
+    try {
+      const result = await parser.getText({ parseHyperlinks: true });
+      const cleaned = cleanExtractedText(result.text);
+      if (cleaned) return cleaned;
+    } catch {
+      // Fall back to standard text extraction if hyperlink annotation parsing fails.
+    }
+    const fallback = await parser.getText();
+    return cleanExtractedText(fallback.text);
   } finally {
     await parser.destroy();
   }
@@ -184,10 +257,7 @@ export function createResumeRouter(db: AppDatabase, resumeStorageRoot: string): 
 
     let extractedText: string;
     try {
-      extractedText = (await extractText(file.buffer, identified.extension))
-        .replace(/\u0000/gu, '')
-        .trim()
-        .slice(0, MAX_EXTRACTED_CHARACTERS);
+      extractedText = await extractText(file.buffer, identified.extension);
     } catch {
       response.status(400).json({ error: 'The document could not be read. Check that it is a valid, unencrypted PDF or DOCX file.' });
       return;
@@ -289,6 +359,23 @@ export function createResumeRouter(db: AppDatabase, resumeStorageRoot: string): 
       response.status(409).json({ error: resume.processingError ?? 'No extracted text is available for this resume.' });
       return;
     }
+
+    const shouldRefresh = request.query.refresh === '1' || request.query.refresh === 'true';
+    if (shouldRefresh) {
+      try {
+        const originalBuffer = await readFile(storagePath(storageRoot, resume.storageKey));
+        const extension: 'pdf' | 'docx' = resume.mimeType === PDF_MIME_TYPE ? 'pdf' : 'docx';
+        const refreshed = await extractText(originalBuffer, extension);
+        if (refreshed.length > 0) {
+          await writePrivateFile(storagePath(storageRoot, resume.extractedTextStorageKey), Buffer.from(refreshed, 'utf8'));
+          response.status(200).type('text/plain').send(refreshed);
+          return;
+        }
+      } catch {
+        // Fall back to the previously stored extracted text if refresh fails.
+      }
+    }
+
     try {
       const content = await readFile(storagePath(storageRoot, resume.extractedTextStorageKey), 'utf8');
       response.status(200).type('text/plain').send(content);

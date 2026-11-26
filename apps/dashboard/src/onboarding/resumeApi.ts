@@ -62,10 +62,11 @@ export const resumeApi = {
     method: 'DELETE',
   }),
 
-  readText: async (id: string): Promise<string> => {
+  readText: async (id: string, refresh = false): Promise<string> => {
     let response: Response;
     try {
-      response = await fetch(`/api/resumes/${encodeURIComponent(id)}/text`, { credentials: 'same-origin' });
+      const query = refresh ? '?refresh=1' : '';
+      response = await fetch(`/api/resumes/${encodeURIComponent(id)}/text${query}`, { credentials: 'same-origin' });
     } catch {
       throw new Error('Cannot reach the local CareerScout API. Make sure the server is running.');
     }

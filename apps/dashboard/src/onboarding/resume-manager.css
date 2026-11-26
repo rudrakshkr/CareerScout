@@ -54,3 +54,16 @@
   .resume-manager-item-spinner { position: absolute; top: 14px; right: 13px; }
   .resume-manager-file-title { padding-right: 18px; }
 }
+
+/* Separate resume actions into clear, independently clickable controls. */
+.resume-manager-actions { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.resume-manager-action-group { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.resume-manager-action-button { min-height: 30px; padding: 0 9px !important; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #e0e9e2 !important; border-radius: 6px; color: #506e5b !important; background: #fff !important; font-size: 9px !important; font-weight: 650; text-decoration: none; cursor: pointer; }
+.resume-manager-action-button.extract { border-color: #cfe3d4 !important; color: #286a45 !important; background: #f4faf5 !important; }
+.resume-manager-action-button.download { color: #496b56 !important; }
+.resume-manager-action-button.danger { border-color: #f0ddda !important; color: #a04e45 !important; background: #fffafa !important; }
+.resume-manager-action-button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 640px) {
+  .resume-manager-actions, .resume-manager-action-group { align-items: flex-start; }
+  .resume-manager-actions { flex-direction: column; }
+}

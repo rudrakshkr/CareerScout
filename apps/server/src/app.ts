@@ -2,6 +2,7 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import type { AppDatabase } from '@career-scout/database';
 import { createAuthRouter } from './routes/auth.js';
 import { createProfileRouter } from './routes/profile.js';
+import { createDiscoveryRouter } from './routes/discovery.js';
 import { createResumeRouter } from './routes/resumes.js';
 import { resolve } from 'node:path';
 
@@ -34,6 +35,7 @@ export function createApp(options: AppOptions): Express {
 
   app.use('/api/auth', createAuthRouter(options.db, { secure: options.cookieSecure }));
   app.use('/api/profile', createProfileRouter(options.db));
+  app.use('/api/discovery', createDiscoveryRouter(options.db, options.resumeStorageRoot));
   app.use('/api/resumes', createResumeRouter(
     options.db,
     options.resumeStorageRoot ?? resolve(process.cwd(), '.local-job-agent/resumes'),

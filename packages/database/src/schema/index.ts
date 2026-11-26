@@ -10,3 +10,8 @@ export * from './job-preferences.js';
 export * from './preferred-roles.js';
 export * from './preferred-locations.js';
 export * from './resume-documents.js';
+export * from './companies.js';
+export * from './job-opportunities.js';
+export * from './contacts.js';
+export * from './outreach-drafts.js';
+export * from './research-runs.js';

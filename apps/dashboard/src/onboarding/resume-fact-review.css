@@ -1,0 +1,60 @@
+.resume-fact-review-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgba(20, 34, 26, .42); }
+.resume-fact-review { width: min(760px, 100%); max-height: min(88vh, 900px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid #e0e9e2; border-radius: 14px; background: #fff; box-shadow: 0 24px 80px rgba(16, 38, 25, .2); }
+.resume-fact-review-header { padding: 22px 24px 17px; display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid #edf1ee; }
+.resume-fact-review-kicker { color: #548269; font-size: 9px; font-weight: 800; letter-spacing: 1px; }
+.resume-fact-review-header h2 { margin: 5px 0 3px; color: #20372b; font-size: 20px; }
+.resume-fact-review-header p { margin: 0; color: #87948c; font-size: 11px; }
+.resume-fact-review-close { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 8px; color: #738279; background: #f5f8f5; cursor: pointer; }
+.resume-fact-review-notice { margin: 16px 22px 0; padding: 11px 13px; display: flex; align-items: flex-start; gap: 9px; border: 1px solid #dcebe0; border-radius: 8px; color: #397552; background: #f5faf6; }
+.resume-fact-review-notice p { margin: 0; color: #557361; font-size: 11px; line-height: 1.55; }
+.resume-fact-review-toolbar { margin: 12px 22px 0; display: flex; align-items: center; justify-content: space-between; font-size: 10px; color: #7a8a80; }
+.resume-fact-review-toolbar button { padding: 4px 8px; border: 1px solid #dfe8e1; border-radius: 6px; color: #3b6b50; background: #fff; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
+.resume-fact-review-error { margin: 10px 22px 0; color: #a0443b; font-size: 11px; }
+.resume-fact-review-loading, .resume-fact-review-empty { margin: 20px 22px; padding: 28px; display: flex; align-items: center; justify-content: center; gap: 10px; border: 1px dashed #dce6de; border-radius: 9px; color: #76867c; font-size: 12px; }
+.resume-fact-review-empty { text-align: center; line-height: 1.6; }
+.resume-fact-review-list { padding: 14px 22px; overflow: auto; display: flex; flex-direction: column; gap: 16px; }
+.resume-fact-review-group { display: grid; gap: 10px; }
+.resume-fact-review-group-heading { display: flex; align-items: center; justify-content: space-between; padding-bottom: 4px; border-bottom: 1px solid #edf1ee; }
+.resume-fact-review-group-heading h3 { margin: 0; color: #355443; font-size: 11px; font-weight: 750; letter-spacing: .3px; text-transform: uppercase; }
+.resume-fact-review-group-heading span { color: #8b9990; font-size: 10px; }
+.resume-fact-review-item { padding: 12px; border: 1px solid #e7eee9; border-radius: 9px; background: #fff; display: flex; flex-direction: column; gap: 9px; }
+.resume-fact-review-item.exists { background: #fafcfb; }
+.resume-fact-review-select { display: flex; align-items: center; gap: 8px; color: #355443; font-size: 11px; font-weight: 750; }
+.resume-fact-review-select input { accent-color: #347b55; }
+.resume-fact-review-select small { margin-left: auto; color: #859289; font-size: 9px; font-weight: 500; }
+.resume-fact-review-input, .resume-fact-review-value input, .resume-fact-review-value select { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid #e1e9e3; border-radius: 6px; outline: none; color: #31463a; background: #fff; font: inherit; font-size: 11px; }
+.resume-fact-review-input:focus, .resume-fact-review-value input:focus, .resume-fact-review-value select:focus { border-color: #91b49c; box-shadow: 0 0 0 3px rgba(73, 139, 92, .1); }
+.resume-fact-review-value { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: center; gap: 9px; }
+.resume-fact-review-current, .resume-fact-review-evidence { margin: 0; color: #839188; font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
+.resume-fact-review-current { color: #8a6d3c; }
+.resume-fact-review-footer { padding: 13px 22px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid #edf1ee; background: #fcfdfc; }
+.resume-fact-review-footer > span { margin-right: auto; color: #829087; font-size: 10px; }
+.resume-fact-review-cancel, .resume-fact-review-approve { min-height: 34px; padding: 0 12px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid #dfe8e1; border-radius: 7px; color: #617267; background: #fff; font-size: 10px; font-weight: 650; cursor: pointer; }
+.resume-fact-review-approve { border-color: #347a52; color: #fff; background: #347a52; }
+.resume-fact-review-cancel:disabled, .resume-fact-review-approve:disabled { opacity: .55; cursor: not-allowed; }
+.resume-fact-review-spin { animation: resume-fact-review-spin .9s linear infinite; }
+@keyframes resume-fact-review-spin { to { transform: rotate(360deg); } }
+.profile-management-heading { margin: 0 0 18px; }
+.profile-management-heading h2 { margin: 5px 0 4px; color: #20372b; font-size: 22px; }
+.profile-management-heading p { margin: 0; color: #829188; font-size: 11px; line-height: 1.6; }
+.profile-management-embedded .onboarding-layout { margin-top: 0; }
+.profile-management-embedded .onboarding-step-sidebar { align-self: start; }
+.resume-fact-review-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.resume-fact-review-fields > label { min-width: 0; display: flex; flex-direction: column; gap: 5px; color: #65796c; font-size: 9px; font-weight: 650; }
+.resume-fact-review-fields > label.wide { grid-column: 1 / -1; }
+.resume-fact-review-fields input, .resume-fact-review-fields select, .resume-fact-review-fields textarea { width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid #e1e9e3; border-radius: 6px; outline: none; color: #31463a; background: #fff; font: inherit; font-size: 10px; font-weight: 450; }
+.resume-fact-review-fields textarea { resize: vertical; line-height: 1.5; }
+.resume-fact-review-fields input:focus, .resume-fact-review-fields select:focus, .resume-fact-review-fields textarea:focus { border-color: #91b49c; box-shadow: 0 0 0 3px rgba(73, 139, 92, .1); }
+.resume-fact-review-fields > label.resume-fact-review-check { flex-direction: row; align-items: center; gap: 7px; }
+.resume-fact-review-fields > label.resume-fact-review-check input { width: auto; accent-color: #347b55; }
+@media (max-width: 680px) {
+  .resume-fact-review-backdrop { padding: 10px; }
+  .resume-fact-review { max-height: 94vh; }
+  .resume-fact-review-header { padding: 17px; }
+  .resume-fact-review-notice, .resume-fact-review-toolbar, .resume-fact-review-error { margin-left: 14px; margin-right: 14px; }
+  .resume-fact-review-list { padding: 12px 14px; }
+  .resume-fact-review-footer { padding: 11px 14px; flex-wrap: wrap; }
+}
+@media (max-width: 600px) {
+  .resume-fact-review-fields, .resume-fact-review-value { grid-template-columns: minmax(0, 1fr); }
+}

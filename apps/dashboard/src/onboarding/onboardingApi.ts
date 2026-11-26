@@ -176,7 +176,7 @@ export interface PreferencesInput {
 
 export const onboardingApi = {
   get: () => request<OnboardingData>('/api/profile'),
-  patchPersonal: (body: {
+  patchPersonal: (body: Partial<{
     displayName: string;
     phone: string | null;
     locationCity: string | null;
@@ -186,7 +186,7 @@ export const onboardingApi = {
     linkedinUrl: string | null;
     githubUrl: string | null;
     currentTitle: string | null;
-  }) => request<{ user: ApiUser; profile: OnboardingProfile }>('/api/profile/personal', {
+  }>) => request<{ user: ApiUser; profile: OnboardingProfile }>('/api/profile/personal', {
     method: 'PATCH', body: JSON.stringify(body),
   }),
   createEducation: (body: EducationInput) => request<{ entry: EducationEntry }>('/api/profile/education', {
