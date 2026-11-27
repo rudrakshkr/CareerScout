@@ -225,10 +225,10 @@ export default function SettingsIntegrations({ onChanged }: { onChanged?: () => 
                   {state.ollama.models.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               ) : (
-                <input className="cs-input cs-mono" value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} placeholder="e.g. llama3.2 or qwen2.5:7b" />
+                <input className="cs-input cs-mono" value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} placeholder="e.g. qwen3.5:4b" />
               )}
               {!state?.ollama.reachable && (
-                <span className="cs-hint">Start Ollama locally (`ollama serve` and `ollama pull llama3.2`), then click Detect models.</span>
+                <span className="cs-hint">Start Ollama locally (`ollama pull qwen3.5:4b`), then click Detect local models.</span>
               )}
             </label>
 

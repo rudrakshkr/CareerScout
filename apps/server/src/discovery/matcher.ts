@@ -24,10 +24,19 @@ const INTERN_TITLE_PATTERN = /\b(?:intern|internship|co-?op|trainee|apprentice(?
 const JUNIOR_PATTERN = /\b(?:entry[\s-]?level|junior|jr\.?|new\s+grad|graduate|fresher|associate|early[\s-]?career|level\s*1|l1|sde[\s-]?1|swe[\s-]?1)\b/iu;
 const HEAVY_EXPERIENCE_PATTERN = /\b(?:[3-9]|1\d)\s*\+?\s*(?:-\s*\d+\s*)?years?\s+(?:of\s+)?(?:professional\s+|industry\s+|software\s+|relevant\s+|work\s+|hands[- ]?on\s+)?experience\b/iu;
 
-// Reject non-software / hardware / specialized non-web engineering titles when targeting SWE/Web roles
 const NON_WEB_SWE_NOISE_TITLE = /\b(?:sales|account\s+executive|business\s+development|marketing|recruiter|talent\s+acquisition|human\s+resources|customer\s+support|customer\s+success|copywriter|graphic\s+designer|nurse|pharmacist|lawyer|counsel|finance|accountant|payroll|annuities|insurance|underwriting|actuarial|supply\s+chain|warehouse|battery|mechanical|civil|electrical|hardware|firmware|embedded|automotive|vehicle|adas|infotainment|aerospace|avionics|manufacturing|simulation|rack\/cluster|silicon|asic|fpga|vlsi|rf\s+engineer|chemical|biotech|clinical|quantum|cheminformatics|accounting|audit|tax|masters?\s+only|ph\.?d\.?\s+(?:intern|research)|research\s+intern|data\s+science|data\s+engineering|data\s+analyst|security\s+clearance|ts\/sci)\b/iu;
 
 const US_STATE_ABBR = /\b(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/u;
+
+const FOREIGN_ONLY_REMOTE_PATTERN = /\b(?:remote\s*(?:in|only\s+in|-|–|\(|,)\s*(?:the\s+)?(?:u\.?s\.?a?\.?|united\s+states|canada|uk|u\.?k\.?|united\s+kingdom|europe|eu\b|emea|latam|north\s+america|germany|france|spain|netherlands|australia|singapore|japan|ireland|poland|brazil|mexico|switzerland|sweden)|(?:u\.?s\.?a?|canada|uk|eu|europe|emea|latam|north\s+america)\s+(?:only\s+)?remote|(?:u\.?s\.?a?|united\s+states|canada|uk|eu|europe|emea|latam|north\s+america)\s+(?:residents?|candidates?|only)\b|must\s+(?:reside|live|be\s+(?:based|located))\s+in\s+(?:the\s+)?(?:u\.?s\.?a?|united\s+states|canada|uk|united\s+kingdom|europe|eu\b|emea|north\s+america)|work\s+from\s+(?:anywhere\s+in\s+)?(?:the\s+)?(?:u\.?s\.?a?|united\s+states|canada|uk|eu|europe)\s+only)\b/iu;
+
+const INDIA_OR_GLOBAL_REMOTE_PATTERN = /\b(?:worldwide|global(?:ly)?|anywhere(?:\s+in\s+the\s+world)?|all\s+regions|apac|asia[\s-]?pacific|india)\b/iu;
+
+const NO_SPONSORSHIP_PATTERN = /\b(?:u\.?s\.?\s+citizenship\s+is\s+required|must\s+be\s+a\s+u\.?s\.?\s+citizen|does\s+not\s+offer\s+(?:visa\s+)?sponsorship|no\s+(?:visa\s+)?sponsorship|unable\s+to\s+sponsor|cannot\s+sponsor|will\s+not\s+sponsor|without\s+(?:the\s+need\s+for\s+)?(?:visa\s+)?sponsorship|not\s+eligible\s+for\s+(?:visa\s+)?sponsorship|security\s+clearance\s+required|itar\b|must\s+(?:already\s+)?have\s+(?:the\s+)?right\s+to\s+work)\b/iu;
+
+const NO_RELOCATION_PATTERN = /\b(?:no\s+(?:international\s+)?relocation(?:\s+(?:support|assistance|package|allowance|offered|provided|available))?|relocation\s+(?:support|assistance|package|allowance)?\s*(?:is\s+)?not\s+(?:offered|provided|available|included|supported)|(?:do|does|will|can)\s*not\s+(?:offer|provide|cover|support)\s+(?:international\s+)?relocation|cannot\s+(?:offer|provide|cover|support)\s+(?:international\s+)?relocation|without\s+relocation|domestic\s+relocation\s+only|relocation\s+(?:only\s+)?within\s+(?:the\s+)?(?:u\.?s\.?a?|united\s+states|canada|uk|eu|europe)|local\s+candidates\s+only|must\s+(?:already\s+)?(?:reside|live|be\s+(?:located|based))\s+(?:in|within\s+commuting\s+distance))\b/iu;
+
+const POSITIVE_RELOCATION_PATTERN = /\b(?:relocation\s+(?:support|assistance|package|allowance|bonus|stipend|provided|offered|available|included|reimbursement|benefits?|covered|budget|grant)|(?:full|international|global|paid)\s+relocation|(?:offer|offers|offering|provide|provides|providing|cover|covers|covering|include|includes|including|assist|assists|assisting|help|helps|helping|support|supports|supporting)\s+(?:with\s+)?(?:full\s+|international\s+)?relocation|visa\s+(?:and|&|\/)\s+relocation|relocation\s+(?:and|&|\/)\s+visa|relocation\s+to\s+[a-z]{3,})\b/iu;
 
 const STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'in', 'at', 'of', 'to', 'a', 'an', 'or', 'on',
@@ -60,7 +69,6 @@ export function buildJobFingerprint(job: RawDiscoveredJob): string {
     .trim()
     .slice(0, 60);
 
-  // Deduplicate identical (company, role title, location) postings even across different requisition URLs
   const payload = `${normCompany}|${normTitle}|${normLoc}`;
   return createHash('sha256').update(payload).digest('hex');
 }
@@ -77,13 +85,12 @@ export function detectWorkArrangement(
   if (/\bhybrid\b/iu.test(header)) return 'hybrid';
   if (/\b(?:on[\s-]?site|in[\s-]?office|in[\s-]?person)\b/iu.test(header)) return 'onsite';
   const snippet = description.slice(0, 1400);
-  if (/\b(?:fully\s+remote|100%\s+remote|remote[\s-]?first|work\s+from\s+home)\b/iu.test(snippet)) return 'remote';
+  if (/\b(?:fully\s+remote|100%\s+remote|remote[\s-]?first|work\s+from\s+home|wfh\s+supported)\b/iu.test(snippet)) return 'remote';
   if (/\bhybrid\b/iu.test(snippet)) return 'hybrid';
   if (/\b(?:on[\s-]?site|in[\s-]?office)\b/iu.test(snippet)) return 'onsite';
-  // If a concrete city/state or city/country is specified with no Remote/Hybrid keyword, treat as on-site
   if (
     location.trim().length >= 3
-    && (location.includes(',') || US_STATE_ABBR.test(location) || /\b(?:nyc|sf|london|paris|berlin|bengaluru|bangalore|mumbai|delhi|hyderabad|pune|chennai|noida|gurgaon|gurugram)\b/iu.test(location))
+    && (location.includes(',') || US_STATE_ABBR.test(location) || /\b(?:nyc|sf|london|paris|berlin|dublin|amsterdam|singapore|tokyo|toronto|sydney|bengaluru|bangalore|mumbai|delhi|hyderabad|pune|chennai|noida|gurgaon|gurugram)\b/iu.test(location))
   ) {
     return 'onsite';
   }
@@ -146,22 +153,156 @@ export function detectCountryScope(
     }
   }
 
-  // Country-locked remote (e.g. "Remote in USA", "Remote in Canada", "US Remote") is international, NOT global remote
-  if (/\bremote\s+(?:in|only\s+in|-)\s*(?:usa|u\.s\.a?\.?|united\s+states|canada|uk|united\s+kingdom|europe|eu|germany|france)\b/iu.test(loc)
-    || /\b(?:us|usa|canada|uk)\s+remote\b/iu.test(loc)) {
+  // Country/region-locked remote (e.g. "Remote in USA", "Remote - Europe", "US Remote") -> international (not global WFH)
+  if (FOREIGN_ONLY_REMOTE_PATTERN.test(loc) && !INDIA_OR_GLOBAL_REMOTE_PATTERN.test(loc)) {
     return 'international';
   }
 
-  if (/\b(?:worldwide|global|anywhere|international|remote\s*-\s*global|all\s+regions)\b/iu.test(`${loc} ${description.slice(0, 500)}`)) {
+  // Truly global / APAC / Worldwide remote
+  if (
+    /\b(?:worldwide|global(?:ly)?|anywhere|all\s+regions|remote\s*[-–·]\s*global|apac|asia[\s-]?pacific)\b/iu.test(loc)
+    || (/^remote(?:\s*\(?(?:flexible|wfh|work\s+from\s+home)\)?)?$/iu.test(loc) && !FOREIGN_ONLY_REMOTE_PATTERN.test(description.slice(0, 1400)))
+  ) {
     return 'remote_global';
   }
 
-  if (loc.length >= 2 && !/^remote$/iu.test(loc)) {
+  if (loc.length >= 2) {
     return 'international';
   }
 
-  if (/^remote$/iu.test(loc)) return 'remote_global';
+  if (/\b(?:worldwide|global(?:ly)?|work\s+from\s+anywhere)\b/iu.test(description.slice(0, 800)) && !FOREIGN_ONLY_REMOTE_PATTERN.test(description.slice(0, 1400))) {
+    return 'remote_global';
+  }
+
   return 'unknown';
+}
+
+export function evaluateInternationalEligibility(options: {
+  locationText: string;
+  description: string;
+  sponsorshipNote?: string | null;
+  countryScope: CountryScope;
+  workArrangement: JobWorkArrangement;
+  homeCountries: string[];
+}): { allowed: boolean; reason: string | null; rejectionReason: string | null; bonus: number } {
+  const { locationText, description, sponsorshipNote, countryScope, workArrangement, homeCountries } = options;
+
+  // National roles inside the user's home country are always eligible
+  if (countryScope === 'national') {
+    return { allowed: true, reason: 'Matches preferred country/region', rejectionReason: null, bonus: 10 };
+  }
+
+  const combinedText = `${locationText}\n${sponsorshipNote ?? ''}\n${description.slice(0, 2600)}`;
+  const homeCountryMentioned = homeCountries.some((country) => {
+    const escaped = country.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    return new RegExp(`\\b${escaped}\\b`, 'iu').test(combinedText);
+  });
+
+  const hasForeignRemoteLock =
+    FOREIGN_ONLY_REMOTE_PATTERN.test(combinedText)
+    && !homeCountryMentioned
+    && !/\b(?:worldwide|anywhere\s+in\s+the\s+world|all\s+regions|apac|asia[\s-]?pacific)\b/iu.test(locationText);
+
+  const hasNoSponsorship = NO_SPONSORSHIP_PATTERN.test(combinedText);
+  const hasNoRelocation = NO_RELOCATION_PATTERN.test(combinedText);
+  const hasRelocationSupport = POSITIVE_RELOCATION_PATTERN.test(combinedText) && !hasNoRelocation;
+
+  // Case 1: Global Remote / WFH supported from home country
+  if (countryScope === 'remote_global' && workArrangement === 'remote') {
+    if (hasForeignRemoteLock) {
+      return {
+        allowed: false,
+        reason: null,
+        rejectionReason: 'Remote role is restricted to foreign countries/regions (not WFH from home country)',
+        bonus: 0,
+      };
+    }
+    return {
+      allowed: true,
+      reason: 'Remote / WFH supported internationally from India',
+      rejectionReason: null,
+      bonus: 10,
+    };
+  }
+
+  // Case 2: International role (outside home country)
+  if (countryScope === 'international') {
+    // Subcase 2a: International Remote — ONLY allowed if WFH from home country is actually supported OR relocation is explicitly provided
+    if (workArrangement === 'remote') {
+      const wfhSupportedFromHome = !hasForeignRemoteLock && (homeCountryMentioned || INDIA_OR_GLOBAL_REMOTE_PATTERN.test(locationText));
+      if (wfhSupportedFromHome) {
+        return {
+          allowed: true,
+          reason: 'International remote / WFH supported from India',
+          rejectionReason: null,
+          bonus: 10,
+        };
+      }
+      if (hasRelocationSupport && !hasNoSponsorship) {
+        return {
+          allowed: true,
+          reason: 'International role with explicit relocation support',
+          rejectionReason: null,
+          bonus: 8,
+        };
+      }
+      return {
+        allowed: false,
+        reason: null,
+        rejectionReason: 'Country-locked foreign remote role (WFH from India not supported and no relocation offered)',
+        bonus: 0,
+      };
+    }
+
+    // Subcase 2b: International On-site / Hybrid / Unspecified mode — MUST explicitly offer relocation support and not block sponsorship
+    if (hasNoSponsorship) {
+      return {
+        allowed: false,
+        reason: null,
+        rejectionReason: 'International role does not offer visa sponsorship or requires local citizenship',
+        bonus: 0,
+      };
+    }
+    if (hasRelocationSupport) {
+      return {
+        allowed: true,
+        reason: 'International on-site/hybrid role with explicit relocation support',
+        rejectionReason: null,
+        bonus: 8,
+      };
+    }
+    return {
+      allowed: false,
+      reason: null,
+      rejectionReason: 'International on-site/hybrid role does not specify relocation support from India',
+      bonus: 0,
+    };
+  }
+
+  // Case 3: Unknown geography — allow only if Remote/WFH (without foreign lock) or explicit relocation support
+  if (workArrangement === 'remote' && !hasForeignRemoteLock) {
+    return {
+      allowed: true,
+      reason: 'Remote / WFH supported',
+      rejectionReason: null,
+      bonus: 6,
+    };
+  }
+  if (hasRelocationSupport && !hasNoSponsorship) {
+    return {
+      allowed: true,
+      reason: 'Relocation support explicitly offered',
+      rejectionReason: null,
+      bonus: 6,
+    };
+  }
+
+  return {
+    allowed: false,
+    reason: null,
+    rejectionReason: 'Location unspecified with neither WFH nor relocation support confirmed',
+    bonus: 0,
+  };
 }
 
 function tokenizeSpecific(text: string): string[] {
@@ -207,21 +348,18 @@ function matchTargetRole(
     const targetTokens = tokenizeSpecific(role.title);
     const targetCategory = role.category || inferRoleCategory(role.title);
 
-    // 1. Direct phrase match
     if (normalizedJob.includes(targetLower) || targetLower.includes(normalizedJob)) {
       const candidate = { matchedTitle: role.title, score: 44, reason: `Direct title match for “${role.title}”` };
       if (!bestMatch || candidate.score > bestMatch.score) bestMatch = candidate;
       continue;
     }
 
-    // 2. Strict category match (requires an explicit software/frontend/backend/full-stack match in the job title)
     const categoryHit = Boolean(targetCategory && jobCategory && (
       targetCategory === jobCategory
       || (targetCategory === 'software_engineering' && ['full_stack', 'frontend', 'backend'].includes(jobCategory))
       || (['full_stack', 'frontend', 'backend'].includes(targetCategory) && jobCategory === 'software_engineering')
     ));
 
-    // 3. Domain-specific token overlap (generic words like "engineering", "intern", "developer" are excluded)
     const overlap = targetTokens.filter((t) => jobTokens.has(t));
     const ratio = targetTokens.length > 0 ? overlap.length / targetTokens.length : 0;
 
@@ -254,6 +392,14 @@ export function evaluateJobAgainstProfile(job: RawDiscoveredJob, profile: UserPr
   const salaryText = (job.salaryText ?? '').trim();
   const tags = job.tags ?? [];
 
+  const homeCountries = Array.from(
+    new Set(
+      [profile.locationCountry, ...profile.preferredLocations.map((l) => l.country)]
+        .filter((c): c is string => Boolean(c && c.trim()))
+        .map((c) => c.trim().toLowerCase()),
+    ),
+  );
+
   const workArrangement = detectWorkArrangement(title, locationText, description, job.explicitWorkArrangement);
   const employmentType = detectEmploymentType(title, description, tags, job.explicitEmploymentType);
   const compensationStatus = detectCompensationStatus(salaryText, description);
@@ -280,21 +426,7 @@ export function evaluateJobAgainstProfile(job: RawDiscoveredJob, profile: UserPr
     verificationStatus: 'discovered',
   });
 
-  // 1. Reject US-citizenship-locked or no-sponsorship foreign roles when user is outside the US
-  const homeCountries = [profile.locationCountry, ...profile.preferredLocations.map((l) => l.country)]
-    .filter((c): c is string => Boolean(c && c.trim()))
-    .map((c) => c.toLowerCase());
-  const userOutsideUS = homeCountries.length > 0 && !homeCountries.some((c) => /united\s+states|\busa?\b/iu.test(c));
-  const sponsorship = `${job.sponsorshipNote ?? ''} ${description.slice(0, 1200)}`;
-  if (
-    userOutsideUS
-    && countryScope === 'international'
-    && /\b(?:u\.?s\.?\s+citizenship\s+is\s+required|must\s+be\s+a\s+u\.?s\.?\s+citizen|does\s+not\s+offer\s+sponsorship|no\s+visa\s+sponsorship|security\s+clearance\s+required|itar\b)\b/iu.test(sponsorship)
-  ) {
-    return reject('Requires US citizenship or does not sponsor international applicants');
-  }
-
-  // 2. Reject non-software / hardware / battery / embedded / finance / PhD / Data-only roles when user targets Web/SWE tracks
+  // 1. Reject non-software / hardware / battery / embedded / finance / PhD / Data-only roles when targeting Web/SWE
   const userTargetsWebSwe = profile.preferredRoles.some((r) =>
     Boolean(r.category && ['frontend', 'backend', 'full_stack', 'software_engineering'].includes(r.category))
     || /\b(?:software|full[\s-]?stack|front[\s-]?end|back[\s-]?end|web|swe|sde)\b/iu.test(r.title),
@@ -307,19 +439,19 @@ export function evaluateJobAgainstProfile(job: RawDiscoveredJob, profile: UserPr
     }
   }
 
-  // 3. STRICT INTERNSHIP GATE: If ALL active target roles are internships, ONLY accept actual internships
+  // 2. STRICT INTERNSHIP GATE: If ALL active target roles are internships, ONLY accept actual internships
   const strictlyInternOnly = userStrictlyTargetsInternships(profile);
   if (strictlyInternOnly && employmentType !== 'internship') {
     return reject('Not an internship (all active target roles require internship seniority)');
   }
 
-  // 4. Enforce Target Role track match
+  // 3. Enforce Target Role track match
   const roleMatch = matchTargetRole(title, tags, profile.preferredRoles);
   if (!roleMatch.matchedTitle) {
     return reject('Does not match selected target roles');
   }
 
-  // 5. Reject Senior/Lead roles or heavy-experience descriptions for early-career / internship profiles
+  // 4. Reject Senior/Lead roles or heavy-experience descriptions for early-career / internship profiles
   const targetSeniorities = new Set(profile.preferredRoles.map((r) => r.seniority));
   const onlyEarlyCareer =
     profile.preferredRoles.length > 0
@@ -334,23 +466,33 @@ export function evaluateJobAgainstProfile(job: RawDiscoveredJob, profile: UserPr
     }
   }
 
-  // 6. Respect work arrangement hard constraint (remote_only rejects on-site; remote_preferred rejects foreign on-site if user is not willing to relocate)
-  const prefWork = profile.preferences?.workArrangement ?? 'any';
-  if (prefWork === 'remote_only' && workArrangement === 'onsite') {
-    return reject('On-site role excluded by remote-only preference', roleMatch.matchedTitle);
+  // 5. INTERNATIONAL ELIGIBILITY GATE:
+  // Non-national jobs MUST either support WFH/remote from India OR explicitly provide relocation support (without sponsorship blocks)
+  const intlCheck = evaluateInternationalEligibility({
+    locationText,
+    description,
+    sponsorshipNote: job.sponsorshipNote,
+    countryScope,
+    workArrangement,
+    homeCountries: homeCountries.length > 0 ? homeCountries : ['india'],
+  });
+  if (!intlCheck.allowed) {
+    return reject(intlCheck.rejectionReason || 'International role not eligible', roleMatch.matchedTitle);
   }
-  if (
-    countryScope === 'international'
-    && workArrangement === 'onsite'
-    && profile.preferences?.willingToRelocate === false
-    && (prefWork === 'remote_preferred' || prefWork === 'remote_only')
-  ) {
-    return reject('Foreign on-site role excluded (not open to international relocation)', roleMatch.matchedTitle);
+
+  // 6. Respect national remote-only preference
+  const prefWork = profile.preferences?.workArrangement ?? 'any';
+  if (prefWork === 'remote_only' && countryScope === 'national' && workArrangement === 'onsite') {
+    return reject('On-site role excluded by remote-only preference', roleMatch.matchedTitle);
   }
 
   const reasons: string[] = [];
   let score = roleMatch.score;
   if (roleMatch.reason) reasons.push(roleMatch.reason);
+  if (intlCheck.reason) {
+    score += intlCheck.bonus;
+    reasons.push(intlCheck.reason);
+  }
 
   // Seniority bonus
   if (employmentType === 'internship' && (targetSeniorities.has('internship') || strictlyInternOnly)) {
@@ -384,20 +526,11 @@ export function evaluateJobAgainstProfile(job: RawDiscoveredJob, profile: UserPr
 
   // Work arrangement preference alignment
   if (workArrangement === 'remote' && ['remote_only', 'remote_preferred', 'hybrid_or_remote'].includes(prefWork)) {
-    score += 10;
-    reasons.push('Remote work matches preference');
-  } else if (workArrangement === 'hybrid' && ['hybrid_or_remote', 'any'].includes(prefWork)) {
-    score += 6;
-    reasons.push('Hybrid work accepted');
-  }
-
-  // Location / scope bonus
-  if (countryScope === 'national') {
-    score += 10;
-    reasons.push('Matches preferred country/region');
-  } else if (countryScope === 'remote_global') {
     score += 8;
-    reasons.push('Open globally / remote-friendly');
+    reasons.push('Remote / WFH matches preference');
+  } else if (workArrangement === 'hybrid' && ['hybrid_or_remote', 'any'].includes(prefWork)) {
+    score += 4;
+    reasons.push('Hybrid work accepted');
   }
 
   // Compensation preference

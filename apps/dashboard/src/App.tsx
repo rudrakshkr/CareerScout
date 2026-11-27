@@ -61,6 +61,7 @@ export default function App() {
             <Route path="/resumes" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/applications" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/outreach" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+            <Route path="/reviewed" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/research" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/settings" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/" element={<Navigate to="/overview" replace />} />

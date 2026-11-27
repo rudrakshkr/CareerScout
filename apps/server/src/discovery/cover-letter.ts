@@ -469,16 +469,17 @@ export async function buildMasterCoverLetterPack(options: {
 
     const systemPrompt = [
       'You are writing a personal, ready-to-use internship cover letter for a real software developer.',
-      'STRICT RULES:',
-      '- Target 180 to 240 words total. Concise, natural, straightforward English.',
-      '- Sound like a real developer writing personally: confident without arrogance, professional without stiffness, never desperate.',
-      '- NEVER start with: "I am writing to express...", "I am thrilled to apply...", "I am passionate about...", or "It is with great enthusiasm...".',
-      '- NEVER use clichés: "at the intersection of", "esteemed organization", "eager to leverage", "invaluable asset", "thrive in dynamic environments", "fast-paced environment", "cutting-edge technology", "innovative approach", "leader in the industry".',
-      '- NEVER use em dashes (—). Use commas or short sentences instead.',
-      '- NEVER dump a long list of frameworks. Explain technical ability through what the projects actually do.',
-      '- ONLY use the verified projects, skills, and company research provided. NEVER invent metrics, users, revenue, extra features, or pretend to have used the company product for years.',
-      isAiRole ? '- Highlight practical AI/LLM engineering where relevant.' : '- Do NOT force AI/LLM experience because this role is not an AI role.',
-      '- Output ONLY the cover letter text (greeting, 3-4 short paragraphs, sign-off). No preamble or commentary.',
+      'FOLLOW EVERY NUMBERED RULE LITERALLY:',
+      `1. Write ONLY for the "${job.title}" role at "${job.companyName}". Mention "${job.companyName}" naturally and NEVER reference any other employer.`,
+      '2. Length MUST be between 180 and 240 words total (3 or 4 short paragraphs).',
+      '3. Tone: plain, direct, natural developer English. Confident without arrogance, professional without stiffness, never desperate.',
+      '4. FORBIDDEN OPENINGS: "I am writing to express...", "I am thrilled to apply...", "I am passionate about...", "It is with great enthusiasm...".',
+      '5. FORBIDDEN PHRASES: "at the intersection of", "esteemed organization", "eager to leverage", "invaluable asset", "thrive in dynamic environments", "fast-paced environment", "cutting-edge technology", "innovative approach", "leader in the industry".',
+      '6. FORBIDDEN PUNCTUATION: Do NOT use em dashes (—). Use commas or periods instead.',
+      '7. SKILLS RULE: Never list a long comma-separated dump of frameworks. Show skills through what the 1-2 selected projects actually build and solve.',
+      '8. TRUTH RULE: Use ONLY the verified projects, skills, education, and company facts given in the user message. NEVER invent user counts, metrics, revenue, features, or claim long-time product usage.',
+      isAiRole ? '9. AI RULE: Practical AI/LLM work is relevant to this role, so highlight it naturally.' : '9. AI RULE: This is NOT an AI role. Do NOT force AI or LLM experience into the letter.',
+      '10. OUTPUT FORMAT: Output ONLY the final cover letter (greeting, paragraphs, sign-off and links). Zero intro, zero notes, zero markdown code fences.',
     ].join('\n');
 
     const userPrompt = [
@@ -509,12 +510,16 @@ export async function buildMasterCoverLetterPack(options: {
       model: ollama.model,
       system: systemPrompt,
       user: userPrompt,
-      timeoutMs: 35_000,
+      timeoutMs: 120_000,
+      numPredict: 540,
+      temperature: 0.25,
     });
 
     if (aiDraft) {
       const cleaned = sanitizeCoverLetterText(aiDraft);
-      if (!violatesMasterStyle(cleaned)) {
+      const companyToken = job.companyName.trim().split(/\s+/u)[0]?.toLowerCase() ?? '';
+      const mentionsTargetCompany = !companyToken || cleaned.toLowerCase().includes(companyToken);
+      if (mentionsTargetCompany && !violatesMasterStyle(cleaned)) {
         coverLetter = cleaned;
         generatedWithAi = true;
       }

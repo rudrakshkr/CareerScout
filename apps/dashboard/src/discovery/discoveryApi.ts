@@ -9,6 +9,9 @@ export interface DiscoverySummary {
     contacts: number;
     pendingDrafts: number;
     approvedDrafts: number;
+    approvedReady?: number;
+    sentDrafts?: number;
+    rejectedDrafts?: number;
   };
   activeRunId: string | null;
   latestRun: {
@@ -74,6 +77,8 @@ export interface DiscoveredJob {
   applicationStatus: 'none' | 'saved' | 'preparing' | 'applied' | 'interviewing' | 'offer' | 'rejected';
   contactCount: number;
   draftCount: number;
+  pendingDraftCount?: number;
+  reviewedDraftCount?: number;
   postedAt: string | null;
   discoveredAt: string;
 }
@@ -109,6 +114,16 @@ export interface CompanyRecord {
   updatedAt: string;
 }
 
+export interface ContactDiscoveryDiagnostics {
+  resolvedDomain: string | null;
+  linkedinHitsReturned: number;
+  linkedinRejected: number;
+  founderWebHits: number;
+  siteEmailsFound: number;
+  githubMembersFound: number;
+  firecrawlError: string | null;
+}
+
 export interface ContactRecord {
   id: string;
   companyId: string | null;
@@ -138,6 +153,7 @@ export interface OutreachDraftRecord {
   targetKind: 'email' | 'person_profile' | 'job_posting' | 'none';
   jobSourceUrl: string | null;
   jobApplyUrl: string | null;
+  contactProof?: { confidence: string; platform: string; sourceUrl: string; sourceNote: string | null } | null;
   subject: string | null;
   body: string;
   groundingFacts: string[];
@@ -233,7 +249,7 @@ export const discoveryApi = {
     }),
 
   generateDraftsForJob: (id: string) =>
-    request<{ created: number; contactsCount: number; newContactsAdded: number; firecrawlUsed: boolean }>(
+    request<{ created: number; contactsCount: number; newContactsAdded: number; firecrawlUsed: boolean; diagnostics?: ContactDiscoveryDiagnostics }>(
       `/api/discovery/jobs/${encodeURIComponent(id)}/generate-drafts`,
       { method: 'POST', body: JSON.stringify({}) },
     ),

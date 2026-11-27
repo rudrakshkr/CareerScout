@@ -1,6 +1,6 @@
 import type { JobEmploymentType, JobWorkArrangement, RawDiscoveredJob } from './types.js';
 
-const USER_AGENT = 'CareerScout-Local/0.4 (local-first personal job assistant)';
+const USER_AGENT = 'CareerScout-Local/0.7 (local-first personal job assistant)';
 
 function stripHtml(html: string | null | undefined): string {
   if (!html) return '';
@@ -17,6 +17,49 @@ function stripHtml(html: string | null | undefined): string {
     .replace(/[ \t]+/gu, ' ')
     .replace(/\n{3,}/gu, '\n\n')
     .trim();
+}
+
+export function unwrapRedirectUrlSync(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+    if (host.includes('google.')) {
+      for (const key of ['q', 'url', 'u']) {
+        const candidate = parsed.searchParams.get(key);
+        if (candidate && /^https?:\/\//iu.test(candidate)) {
+          return candidate;
+        }
+      }
+    }
+    return parsed.href;
+  } catch {
+    return trimmed;
+  }
+}
+
+export async function resolveRedirectUrl(rawUrl: string): Promise<string> {
+  const syncUnwrapped = unwrapRedirectUrlSync(rawUrl);
+  try {
+    const parsed = new URL(syncUnwrapped);
+    if (!/google\.[a-z.]+\/(?:goto|url)/iu.test(parsed.href)) {
+      return parsed.href;
+    }
+    const res = await fetch(parsed.href, {
+      method: 'GET',
+      redirect: 'manual',
+      headers: { 'User-Agent': USER_AGENT },
+      signal: AbortSignal.timeout(5000),
+    });
+    const loc = res.headers.get('location');
+    if (loc && /^https?:\/\//iu.test(loc) && !/google\.[a-z.]+\/(?:goto|url)/iu.test(loc)) {
+      return loc;
+    }
+  } catch {
+    // Keep original if redirect probe fails
+  }
+  return syncUnwrapped;
 }
 
 async function fetchJson<T>(url: string, init: RequestInit = {}, timeoutMs = 15_000): Promise<T | null> {
@@ -49,16 +92,19 @@ export async function firecrawlWebSearch(options: {
   query: string;
   limit?: number;
   tbs?: 'qdr:d' | 'qdr:w' | 'qdr:m';
+  includeDomains?: string[];
+  excludeDomains?: string[];
 }): Promise<{ ok: boolean; hits: FirecrawlSearchHit[]; error: string | null }> {
   const key = options.apiKey.trim();
   if (!key) return { ok: false, hits: [], error: 'Firecrawl API key is not configured.' };
 
-  // Use Firecrawl v2 search endpoint; fall back to v1 shape transparently if needed
   const body: Record<string, unknown> = {
-    query: options.query,
+    query: options.query.slice(0, 490),
     limit: options.limit ?? 8,
   };
   if (options.tbs) body.tbs = options.tbs;
+  if (options.includeDomains?.length) body.includeDomains = options.includeDomains;
+  if (options.excludeDomains?.length) body.excludeDomains = options.excludeDomains;
 
   for (const endpoint of ['https://api.firecrawl.dev/v2/search', 'https://api.firecrawl.dev/v1/search']) {
     try {
@@ -69,14 +115,14 @@ export async function firecrawlWebSearch(options: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(22_000),
+        signal: AbortSignal.timeout(25_000),
       });
 
       if (response.status === 401 || response.status === 403) {
         return { ok: false, hits: [], error: 'Firecrawl rejected the API key (HTTP 401/403).' };
       }
       if (response.status === 402 || response.status === 429) {
-        return { ok: false, hits: [], error: 'Firecrawl credit limit or rate limit reached.' };
+        return { ok: false, hits: [], error: 'Firecrawl credit limit or rate limit reached (HTTP 402/429).' };
       }
       if (!response.ok) continue;
 
@@ -91,10 +137,13 @@ export async function firecrawlWebSearch(options: {
           ? payload.data.web
           : [];
 
-      const hits = rawList.filter((item): item is FirecrawlSearchHit => Boolean(item?.url && item?.title));
+      const hits = rawList
+        .filter((item): item is FirecrawlSearchHit => Boolean(item?.url && item?.title))
+        .map((item) => ({ ...item, url: unwrapRedirectUrlSync(item.url) }));
+
       return { ok: true, hits, error: null };
     } catch {
-      // Try next endpoint
+      // Try fallback endpoint
     }
   }
   return { ok: false, hits: [], error: 'Could not reach Firecrawl search API.' };
@@ -408,39 +457,59 @@ export async function fetchHackerNewsHiringJobs(): Promise<RawDiscoveredJob[]> {
   return jobs;
 }
 
+// Prioritized India-hiring & Global-Remote ATS boards first so both Quick and Overnight runs hit eligible roles fast
 export const CURATED_ATS_BOARDS: Array<{ provider: 'greenhouse' | 'lever' | 'ashby'; token: string; companyName: string }> = [
+  // Strong India engineering hubs & India-remote startups
   { provider: 'greenhouse', token: 'razorpaysoftwareprivatelimited', companyName: 'Razorpay' },
   { provider: 'greenhouse', token: 'postman', companyName: 'Postman' },
   { provider: 'greenhouse', token: 'browserstack', companyName: 'BrowserStack' },
-  { provider: 'lever', token: 'atlassian', companyName: 'Atlassian' },
+  { provider: 'greenhouse', token: 'phonepe', companyName: 'PhonePe' },
+  { provider: 'greenhouse', token: 'groww', companyName: 'Groww' },
+  { provider: 'greenhouse', token: 'swiggy', companyName: 'Swiggy' },
+  { provider: 'greenhouse', token: 'chargebee', companyName: 'Chargebee' },
+  { provider: 'greenhouse', token: 'freshworks', companyName: 'Freshworks' },
+  { provider: 'greenhouse', token: 'rubrik', companyName: 'Rubrik' },
+  { provider: 'greenhouse', token: 'cohesity', companyName: 'Cohesity' },
+  { provider: 'greenhouse', token: 'harness', companyName: 'Harness' },
+  { provider: 'greenhouse', token: 'hasura', companyName: 'Hasura' },
+  { provider: 'greenhouse', token: 'sprinklr', companyName: 'Sprinklr' },
+  { provider: 'greenhouse', token: 'nutanix', companyName: 'Nutanix' },
+  { provider: 'greenhouse', token: 'twilio', companyName: 'Twilio' },
+  { provider: 'greenhouse', token: 'atlassian', companyName: 'Atlassian' },
   { provider: 'lever', token: 'meesho', companyName: 'Meesho' },
   { provider: 'lever', token: 'cred', companyName: 'CRED' },
+  { provider: 'lever', token: 'paytm', companyName: 'Paytm' },
+  { provider: 'lever', token: 'dream11', companyName: 'Dream11' },
+  { provider: 'ashby', token: 'deel', companyName: 'Deel' },
+  { provider: 'ashby', token: 'posthog', companyName: 'PostHog' },
+  { provider: 'ashby', token: 'supabase', companyName: 'Supabase' },
+  { provider: 'ashby', token: 'replit', companyName: 'Replit' },
+  // Global remote-friendly & international relocation companies
   { provider: 'greenhouse', token: 'gitlab', companyName: 'GitLab' },
-  { provider: 'greenhouse', token: 'supabase', companyName: 'Supabase' },
   { provider: 'greenhouse', token: 'vercel', companyName: 'Vercel' },
-  { provider: 'greenhouse', token: 'stripe', companyName: 'Stripe' },
   { provider: 'greenhouse', token: 'cloudflare', companyName: 'Cloudflare' },
+  { provider: 'greenhouse', token: 'stripe', companyName: 'Stripe' },
   { provider: 'greenhouse', token: 'mongodb', companyName: 'MongoDB' },
   { provider: 'greenhouse', token: 'datadog', companyName: 'Datadog' },
-  { provider: 'ashby', token: 'notion', companyName: 'Notion' },
-  { provider: 'ashby', token: 'openai', companyName: 'OpenAI' },
-  { provider: 'ashby', token: 'ramp', companyName: 'Ramp' },
-  { provider: 'ashby', token: 'linear', companyName: 'Linear' },
-  { provider: 'ashby', token: 'perplexity', companyName: 'Perplexity' },
-  { provider: 'ashby', token: 'snowflake', companyName: 'Snowflake' },
-  { provider: 'ashby', token: 'airwallex', companyName: 'Airwallex' },
-  { provider: 'ashby', token: 'replit', companyName: 'Replit' },
-  { provider: 'ashby', token: 'vanta', companyName: 'Vanta' },
-  { provider: 'greenhouse', token: 'figma', companyName: 'Figma' },
-  { provider: 'greenhouse', token: 'anthropic', companyName: 'Anthropic' },
-  { provider: 'greenhouse', token: 'airbnb', companyName: 'Airbnb' },
+  { provider: 'greenhouse', token: 'grafanalabs', companyName: 'Grafana Labs' },
+  { provider: 'greenhouse', token: 'sentry', companyName: 'Sentry' },
+  { provider: 'greenhouse', token: 'remotecom', companyName: 'Remote' },
+  { provider: 'greenhouse', token: 'canonical', companyName: 'Canonical' },
+  { provider: 'greenhouse', token: 'elastic', companyName: 'Elastic' },
+  { provider: 'greenhouse', token: 'zscaler', companyName: 'Zscaler' },
+  { provider: 'greenhouse', token: 'okta', companyName: 'Okta' },
   { provider: 'greenhouse', token: 'coinbase', companyName: 'Coinbase' },
   { provider: 'greenhouse', token: 'dropbox', companyName: 'Dropbox' },
-  { provider: 'greenhouse', token: 'reddit', companyName: 'Reddit' },
-  { provider: 'greenhouse', token: 'discord', companyName: 'Discord' },
-  { provider: 'greenhouse', token: 'duolingo', companyName: 'Duolingo' },
-  { provider: 'lever', token: 'plaid', companyName: 'Plaid' },
+  { provider: 'greenhouse', token: 'figma', companyName: 'Figma' },
+  { provider: 'greenhouse', token: 'airbnb', companyName: 'Airbnb' },
+  { provider: 'ashby', token: 'notion', companyName: 'Notion' },
+  { provider: 'ashby', token: 'linear', companyName: 'Linear' },
+  { provider: 'ashby', token: 'airwallex', companyName: 'Airwallex' },
+  { provider: 'ashby', token: 'perplexity', companyName: 'Perplexity' },
+  { provider: 'ashby', token: 'ramp', companyName: 'Ramp' },
+  { provider: 'ashby', token: 'vanta', companyName: 'Vanta' },
   { provider: 'lever', token: 'spotify', companyName: 'Spotify' },
+  { provider: 'lever', token: 'plaid', companyName: 'Plaid' },
 ];
 
 export async function fetchAshbyBoard(token: string, companyName: string): Promise<RawDiscoveredJob[]> {
@@ -583,60 +652,85 @@ export async function fetchFirecrawlDiscoveryJobs(options: {
   includeInternational: boolean;
   homeCountry: string | null;
   creditBudget: number;
-}): Promise<{ jobs: RawDiscoveredJob[]; creditsUsed: number }> {
-  if (!options.apiKey.trim() || options.creditBudget <= 0) return { jobs: [], creditsUsed: 0 };
+}): Promise<{ jobs: RawDiscoveredJob[]; creditsUsed: number; error: string | null }> {
+  if (!options.apiKey.trim() || options.creditBudget <= 0) {
+    return { jobs: [], creditsUsed: 0, error: null };
+  }
 
   const jobs: RawDiscoveredJob[] = [];
+  const seenUrls = new Set<string>();
   let creditsUsed = 0;
+  let lastError: string | null = null;
 
-  const siteFilter = '(site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com OR site:wellfound.com/jobs OR site:workatastartup.com OR site:internshala.com)';
-  const regionClause = options.includeNational && options.homeCountry
-    ? options.includeInternational
-      ? `(Remote OR "${options.homeCountry}")`
-      : `"${options.homeCountry}"`
-    : 'Remote';
+  const atsSites = '(site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com)';
+  const startupSites = '(site:wellfound.com/jobs OR site:workatastartup.com OR site:internshala.com OR site:cutshort.io)';
+  const home = options.homeCountry || 'India';
+  const baseRoles = options.roleTitles.length > 0 ? options.roleTitles.slice(0, 5) : ['Software Engineering Intern'];
 
-  const queries = options.roleTitles.slice(0, Math.min(options.creditBudget, 4)).map((role) =>
-    `${siteFilter} "${role}" ${regionClause}${options.internOnly && !/intern/iu.test(role) ? ' internship' : ''}`,
-  );
+  const queries: string[] = [];
+  for (const role of baseRoles) {
+    const internWord = options.internOnly && !/intern/iu.test(role) ? ' internship' : '';
+    if (options.includeNational) {
+      queries.push(`${startupSites} "${role}"${internWord} "${home}"`);
+      queries.push(`${atsSites} "${role}"${internWord} "${home}"`);
+    }
+    if (options.includeInternational) {
+      queries.push(`${atsSites} "${role}"${internWord} ("Remote Worldwide" OR "Work from anywhere" OR "APAC")`);
+      queries.push(`${atsSites} "${role}"${internWord} ("relocation support" OR "relocation assistance" OR "relocation package")`);
+    }
+  }
 
-  for (const query of queries) {
+  const maxQueries = Math.min(options.creditBudget, 10);
+  for (const query of queries.slice(0, maxQueries)) {
     if (creditsUsed >= options.creditBudget) break;
     const res = await firecrawlWebSearch({
       apiKey: options.apiKey,
       query,
-      limit: 8,
+      limit: 10,
       tbs: 'qdr:m',
     });
     creditsUsed += 1;
-    if (!res.ok) break;
+    if (!res.ok) {
+      lastError = res.error;
+      break;
+    }
 
     for (const hit of res.hits) {
-      const cleanedTitle = hit.title.replace(/\s*\|\s*(?:Greenhouse|Lever|Ashby|Wellfound|Internshala).*$/iu, '').trim();
+      const cleanUrl = await resolveRedirectUrl(hit.url);
+      if (/google\.[a-z.]+\/(?:goto|url)/iu.test(cleanUrl) || seenUrls.has(cleanUrl)) continue;
+      seenUrls.add(cleanUrl);
+
+      const cleanedTitle = hit.title.replace(/\s*\|\s*(?:Greenhouse|Lever|Ashby|Wellfound|Internshala|Cutshort).*$/iu, '').trim();
       const parts = cleanedTitle.split(/\s+(?:at|-|–|\|)\s+/iu).map((p) => p.trim()).filter(Boolean);
       const title = parts[0] || cleanedTitle;
       const host = (() => {
-        try { return new URL(hit.url).hostname.replace(/^www\./u, ''); } catch { return ''; }
+        try { return new URL(cleanUrl).hostname.replace(/^www\./u, ''); } catch { return ''; }
       })();
       let companyName = parts[1] || host;
-      // Extract company token from ATS URLs when possible
-      const atsTokenMatch = hit.url.match(/(?:boards\.greenhouse\.io|jobs\.lever\.co|jobs\.ashbyhq\.com)\/([^/?#]+)/iu);
+      let parsedLocation: string | null = null;
+
+      if (/[•·]/u.test(companyName)) {
+        const compParts = companyName.split(/[•·]/u).map((p) => p.trim()).filter(Boolean);
+        companyName = compParts[0] || companyName;
+        if (compParts[1]) parsedLocation = compParts.slice(1).join(', ');
+      }
+      const atsTokenMatch = cleanUrl.match(/(?:boards\.greenhouse\.io|jobs\.lever\.co|jobs\.ashbyhq\.com)\/([^/?#]+)/iu);
       if (atsTokenMatch?.[1] && (!parts[1] || /greenhouse|lever|ashby/iu.test(parts[1]))) {
         companyName = atsTokenMatch[1].replace(/[-_]+/gu, ' ').replace(/\b\w/gu, (c) => c.toUpperCase());
       }
 
       jobs.push({
         sourceName: 'firecrawl',
-        sourceUrl: hit.url,
-        applyUrl: hit.url,
+        sourceUrl: cleanUrl,
+        applyUrl: cleanUrl,
         title: title.slice(0, 120),
         companyName: companyName.slice(0, 80),
-        locationText: /remote/iu.test(`${hit.title} ${hit.description ?? ''}`) ? 'Remote' : options.homeCountry,
+        locationText: parsedLocation || (/remote/iu.test(`${hit.title} ${hit.description ?? ''}`) ? 'Remote' : options.homeCountry),
         description: (hit.markdown || hit.description || '').slice(0, 5000),
         postedAt: new Date(),
         explicitEmploymentType: options.internOnly ? 'internship' : null,
       });
     }
   }
-  return { jobs, creditsUsed };
+  return { jobs, creditsUsed, error: lastError };
 }

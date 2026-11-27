@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Circle,
   Compass,
+  FileCheck2,
   FileText,
   LayoutDashboard,
   LogOut,
@@ -47,6 +48,7 @@ type SectionId =
   | 'contacts'
   | 'applications'
   | 'outreach'
+  | 'reviewed'
   | 'research'
   | 'profile'
   | 'settings';
@@ -75,6 +77,7 @@ const navGroups: Array<{
     items: [
       { id: 'applications', label: 'Applications', path: '/applications', icon: BriefcaseBusiness },
       { id: 'outreach', label: 'Outreach drafts', path: '/outreach', icon: Mail },
+      { id: 'reviewed', label: 'Reviewed drafts', path: '/reviewed', icon: FileCheck2 },
       { id: 'research', label: 'Research runner', path: '/research', icon: Terminal },
     ],
   },
@@ -94,7 +97,8 @@ const sectionHeaderCopy: Record<SectionId, { title: string; subtitle: string }> 
   companies: { title: 'Companies', subtitle: 'Employers discovered from matched roles with ATS links, open roles, and contact counts.' },
   contacts: { title: 'People & contacts', subtitle: 'Source-backed hiring managers, recruiters, and engineers discovered for matched companies.' },
   applications: { title: 'Applications pipeline', subtitle: 'Track saved roles, preparation, submissions, and interview stages.' },
-  outreach: { title: 'Outreach drafts', subtitle: 'Human-in-the-loop referral requests, emails, and tailored cover letters grounded in your verified facts.' },
+  outreach: { title: 'Outreach drafts', subtitle: 'Pending review inbox. Approved and rejected drafts move automatically to Reviewed drafts.' },
+  reviewed: { title: 'Reviewed drafts', subtitle: 'Approved drafts ready to send, sent outreach history, and rejected proposals.' },
   research: { title: 'Overnight research runner', subtitle: 'Configure multi-hour overnight runs or quick scans with live checkpoints and logs.' },
   profile: { title: 'Profile Hub', subtitle: 'Edit your verified personal details, education, experience, projects, skills, and target preferences.' },
   settings: { title: 'Settings & local runtime', subtitle: 'Manage appearance, local account security, and Ollama/Firecrawl/SMTP configuration.' },
@@ -248,6 +252,7 @@ export default function Dashboard() {
     if (id === 'contacts') return discoverySummary.counts.contacts;
     if (id === 'applications') return discoverySummary.counts.applicationsActive;
     if (id === 'outreach') return discoverySummary.counts.pendingDrafts;
+    if (id === 'reviewed') return discoverySummary.counts.approvedDrafts + (discoverySummary.counts.rejectedDrafts ?? 0);
     return undefined;
   }
 
@@ -515,7 +520,8 @@ export default function Dashboard() {
           )}
 
           {activeSection === 'discover' && <DiscoverPage onDataChanged={() => void loadSnapshot()} />}
-          {activeSection === 'outreach' && <OutreachPage onDataChanged={() => void loadSnapshot()} />}
+          {activeSection === 'outreach' && <OutreachPage mode="inbox" onDataChanged={() => void loadSnapshot()} />}
+          {activeSection === 'reviewed' && <OutreachPage mode="reviewed" onDataChanged={() => void loadSnapshot()} />}
           {activeSection === 'companies' && <CompaniesContactsPage view="companies" />}
           {activeSection === 'contacts' && <CompaniesContactsPage view="contacts" />}
           {activeSection === 'applications' && <ApplicationsView onDataChanged={() => void loadSnapshot()} />}

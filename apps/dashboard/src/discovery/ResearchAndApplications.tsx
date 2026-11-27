@@ -100,7 +100,7 @@ export function ApplicationsView({ onDataChanged }: { onDataChanged?: () => void
                   <option value="none">Remove from pipeline</option>
                 </select>
                 <button type="button" className="cs-btn cs-btn-sm" onClick={() => navigate(`/outreach?jobId=${encodeURIComponent(job.id)}`)}>
-                  <Mail size={13} />Drafts ({job.draftCount})
+                  <Mail size={13} />Drafts ({job.pendingDraftCount ?? job.draftCount})
                 </button>
                 <a className="cs-btn cs-btn-sm" href={job.applyUrl || job.sourceUrl} target="_blank" rel="noreferrer">
                   <ExternalLink size={13} />Posting
@@ -126,19 +126,28 @@ export function ResearchRunnerView({ onDataChanged }: { onDataChanged?: () => vo
   const [useLocalOllama, setUseLocalOllama] = useState(false);
   const [firecrawlCredits, setFirecrawlCredits] = useState(0);
   const [customTokens, setCustomTokens] = useState('');
+  const [defaultsLoaded, setDefaultsLoaded] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
   const loadRuns = useCallback(async () => {
     try {
-      const res = await discoveryApi.listRuns();
-      setRuns(res.runs);
+      const [runsRes, summaryRes] = await Promise.all([
+        discoveryApi.listRuns(),
+        discoveryApi.summary(),
+      ]);
+      setRuns(runsRes.runs);
+      if (!defaultsLoaded) {
+        if (summaryRes.providers.ollamaConfigured) setUseLocalOllama(true);
+        if (summaryRes.providers.firecrawlConfigured) setFirecrawlCredits(25);
+        setDefaultsLoaded(true);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load research runs.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [defaultsLoaded]);
 
   useEffect(() => {
     void loadRuns();
@@ -166,7 +175,9 @@ export function ResearchRunnerView({ onDataChanged }: { onDataChanged?: () => vo
         .filter(Boolean)
         .map((entry) => {
           const [providerRaw, tokenRaw] = entry.includes(':') ? entry.split(':') : ['greenhouse', entry];
-          const provider: 'greenhouse' | 'lever' = providerRaw.trim().toLowerCase() === 'lever' ? 'lever' : 'greenhouse';
+          const pLower = providerRaw.trim().toLowerCase();
+          const provider: 'greenhouse' | 'lever' | 'ashby' =
+            pLower === 'lever' ? 'lever' : pLower === 'ashby' ? 'ashby' : 'greenhouse';
           const token = (tokenRaw ?? '').trim();
           return { provider, token, companyName: token };
         })
@@ -187,7 +198,7 @@ export function ResearchRunnerView({ onDataChanged }: { onDataChanged?: () => vo
         res.alreadyRunning
           ? 'A research run is already running.'
           : mode === 'overnight'
-            ? `Overnight runner started for up to ${hours} hours! Keep your laptop awake and CareerScout running—new target-role jobs, contacts, and reviewable drafts will wait for you in the morning.`
+            ? `Overnight runner started for up to ${hours} hours! Close heavy browser tabs and VS Code to free RAM for Qwen 3.5 4B.`
             : 'Quick discovery scan started!',
       );
       await loadRuns();
@@ -217,8 +228,9 @@ export function ResearchRunnerView({ onDataChanged }: { onDataChanged?: () => vo
           <div>
             <h2>Overnight & on-demand discovery runner</h2>
             <p>
-              Quick Scan checks fast internship feeds + top 8 ATS boards (1–2 min). Overnight Deep Researcher sweeps all 33+ Greenhouse, Lever & Ashby boards + performs deep GitHub/website/Firecrawl real-people & referral discovery (never creating placeholder LinkedIn contacts)
-              — filtering strictly by your saved Target Roles and preparing human-review drafts.
+              Overnight Deep Researcher sweeps 50+ India & Global-Remote ATS boards + RemoteFirstJobs, Remotive, HN Hiring, Firecrawl v2 (reserving 60% of credits for real-people waterfall & backfill), &
+              Firecrawl v2, double-checks international WFH/relocation eligibility, and verifies that every discovered contact
+              currently works at the exact company before drafting outreach.
             </p>
           </div>
           {activeRun && (
@@ -242,20 +254,20 @@ export function ResearchRunnerView({ onDataChanged }: { onDataChanged?: () => vo
               <input className="cs-input" type="number" min={10} max={500} value={maxJobs} onChange={(e) => setMaxJobs(Number(e.target.value) || 150)} />
             </label>
             <label className="cs-field">
-              <span className="cs-label">Firecrawl credit cap (requires FIRECRAWL_API_KEY in .env)</span>
-              <input className="cs-input" type="number" min={0} max={25} value={firecrawlCredits} onChange={(e) => setFirecrawlCredits(Number(e.target.value) || 0)} />
+              <span className="cs-label">Firecrawl credit cap (configured in Settings)</span>
+              <input className="cs-input" type="number" min={0} max={50} value={firecrawlCredits} onChange={(e) => setFirecrawlCredits(Number(e.target.value) || 0)} />
             </label>
             <label className="cs-field">
               <span className="cs-label">Extra company ATS boards (optional)</span>
-              <input className="cs-input" value={customTokens} onChange={(e) => setCustomTokens(e.target.value)} placeholder="e.g. greenhouse:airbnb, lever:netflix" />
+              <input className="cs-input" value={customTokens} onChange={(e) => setCustomTokens(e.target.value)} placeholder="e.g. greenhouse:airbnb, lever:netflix, ashby:ramp" />
             </label>
           </div>
 
           <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
             <label className="cs-checkbox"><input type="checkbox" checked={includeNational} onChange={(e) => setIncludeNational(e.target.checked)} /><span>Include national jobs</span></label>
-            <label className="cs-checkbox"><input type="checkbox" checked={includeInternational} onChange={(e) => setIncludeInternational(e.target.checked)} /><span>Include international & remote global jobs</span></label>
-            <label className="cs-checkbox"><input type="checkbox" checked={generateDrafts} onChange={(e) => setGenerateDrafts(e.target.checked)} /><span>Auto-find company contacts & draft referral/outreach proposals</span></label>
-            <label className="cs-checkbox"><input type="checkbox" checked={useLocalOllama} onChange={(e) => setUseLocalOllama(e.target.checked)} /><span>Polish drafts with local Ollama (if running)</span></label>
+            <label className="cs-checkbox"><input type="checkbox" checked={includeInternational} onChange={(e) => setIncludeInternational(e.target.checked)} /><span>Include international jobs (only WFH from India or on-site with relocation support)</span></label>
+            <label className="cs-checkbox"><input type="checkbox" checked={generateDrafts} onChange={(e) => setGenerateDrafts(e.target.checked)} /><span>Find verified current employees & draft referral/outreach proposals</span></label>
+            <label className="cs-checkbox"><input type="checkbox" checked={useLocalOllama} onChange={(e) => setUseLocalOllama(e.target.checked)} /><span>Use local Ollama AI (verify current employees, international eligibility & polish drafts)</span></label>
           </div>
 
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>

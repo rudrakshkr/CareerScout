@@ -1,3 +1,5 @@
+import { generateGroundedDraftProposals } from '../apps/server/dist/discovery/people-and-drafts.js';
+import { unwrapRedirectUrlSync } from '../apps/server/dist/discovery/connectors.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,6 +20,7 @@ import {
 import { createSession, SESSION_COOKIE_NAME } from '../apps/server/dist/auth/session.js';
 import { createDiscoveryRouter } from '../apps/server/dist/routes/discovery.js';
 import { evaluateJobAgainstProfile } from '../apps/server/dist/discovery/matcher.js';
+import { isValidGithubOrgMatch, sanitizeBioRole, verifyLinkedinSearchHit } from '../apps/server/dist/discovery/people-and-drafts.js';
 
 function applyMigrations(client) {
   const drizzleDir = path.resolve('packages/database/drizzle');
@@ -325,4 +328,221 @@ test('enforces human approval gate before email sending, builds grounded tailore
     await new Promise((resolve) => server.close(resolve));
     conn.close();
   }
+});
+
+test('rejects false-positive GitHub orgs (APT vs aptos-labs) and unrelated LinkedIn recruiters (BrowserStack vs APT)', () => {
+  // APT (apt.trading) MUST NOT match aptos-labs
+  assert.equal(
+    isValidGithubOrgMatch({
+      companyName: 'APT',
+      companyDomain: 'apt.trading',
+      orgLogin: 'aptos-labs',
+      orgName: 'Aptos Labs',
+      orgBlog: 'https://aptoslabs.com',
+    }),
+    false,
+  );
+
+  // Short name "APT" with no domain MUST NOT blindly match any org
+  assert.equal(
+    isValidGithubOrgMatch({
+      companyName: 'APT',
+      companyDomain: null,
+      orgLogin: 'apt',
+      orgName: 'APT',
+      orgBlog: null,
+    }),
+    false,
+  );
+
+  // Legitimate exact org match SHOULD pass
+  assert.equal(
+    isValidGithubOrgMatch({
+      companyName: 'Razorpay',
+      companyDomain: 'razorpay.com',
+      orgLogin: 'razorpay',
+      orgName: 'Razorpay',
+      orgBlog: 'https://razorpay.com',
+    }),
+    true,
+  );
+
+  // Emoji-only GitHub bio ":)" MUST fall back to clean role string
+  assert.equal(sanitizeBioRole(':)', 'Engineer at APT'), 'Engineer at APT');
+
+  // Unrelated BrowserStack recruiter in Mumbai MUST be rejected for "APT • Mumbai"
+  const browserstackRecruiter = verifyLinkedinSearchHit(
+    {
+      url: 'https://in.linkedin.com/in/amrin-kably-b226a113b',
+      title: 'Amrin Kably - Lead Technical Recruiter - BrowserStack | LinkedIn',
+      description: 'Lead Technical Recruiter - Product & Engineering at BrowserStack. Previously in Mumbai.',
+    },
+    'APT • Mumbai',
+    'apt.trading',
+  );
+  assert.equal(browserstackRecruiter.accepted, false);
+
+  // Real employee explicitly listing APT SHOULD pass
+  const realAptEmployee = verifyLinkedinSearchHit(
+    {
+      url: 'https://in.linkedin.com/in/rohan-mehta-apt',
+      title: 'Rohan Mehta - Engineering Manager at APT | LinkedIn',
+      description: 'Building algorithmic trading infrastructure at APT (apt.trading) in Mumbai.',
+    },
+    'APT • Mumbai',
+    'apt.trading',
+  );
+  assert.equal(realAptEmployee.accepted, true);
+  assert.equal(realAptEmployee.personName, 'Rohan Mehta');
+});
+
+test('international jobs require either WFH-from-India or explicit relocation support', () => {
+  // 1. International on-site WITH explicit relocation support -> ACCEPTED
+  const intlWithRelocation = evaluateJobAgainstProfile(
+    {
+      sourceName: 'greenhouse',
+      sourceUrl: 'https://boards.greenhouse.io/eurotech/jobs/101',
+      title: 'Software Engineer Intern',
+      companyName: 'EuroTech',
+      locationText: 'Berlin, Germany',
+      salaryText: '€2,500 / month',
+      description: 'Join our backend team in Berlin. We provide visa sponsorship and a full relocation package for international interns.',
+      explicitEmploymentType: 'internship',
+    },
+    internOnlyProfile,
+  );
+  assert.equal(intlWithRelocation.accepted, true);
+  assert.ok(intlWithRelocation.matchReasons.some((r) => /relocation support/iu.test(r)));
+
+  // 2. International on-site WITHOUT relocation mention -> REJECTED
+  const intlNoRelocation = evaluateJobAgainstProfile(
+    {
+      sourceName: 'greenhouse',
+      sourceUrl: 'https://boards.greenhouse.io/uscorp/jobs/102',
+      title: 'Software Engineer Intern',
+      companyName: 'USCorp',
+      locationText: 'San Francisco, CA',
+      description: 'Build React and Node.js products in our San Francisco office.',
+      explicitEmploymentType: 'internship',
+    },
+    internOnlyProfile,
+  );
+  assert.equal(intlNoRelocation.accepted, false);
+
+  // 3. International on-site explicitly saying NO relocation -> REJECTED
+  const intlDeniedRelocation = evaluateJobAgainstProfile(
+    {
+      sourceName: 'ashby',
+      sourceUrl: 'https://jobs.ashbyhq.com/localco/103',
+      title: 'Full Stack Developer Intern',
+      companyName: 'LocalCo',
+      locationText: 'London, UK',
+      description: 'On-site role in London. Please note that relocation support is not offered for internships.',
+      explicitEmploymentType: 'internship',
+    },
+    internOnlyProfile,
+  );
+  assert.equal(intlDeniedRelocation.accepted, false);
+
+  // 4. International on-site offering relocation BUT refusing visa sponsorship -> REJECTED
+  const intlRelocationNoVisa = evaluateJobAgainstProfile(
+    {
+      sourceName: 'ashby',
+      sourceUrl: 'https://jobs.ashbyhq.com/novisa/104',
+      title: 'Software Engineer Intern',
+      companyName: 'NoVisaCo',
+      locationText: 'Seattle, WA',
+      description: 'We offer a relocation bonus for interns. This role does not offer visa sponsorship.',
+      explicitEmploymentType: 'internship',
+    },
+    internOnlyProfile,
+  );
+  assert.equal(intlRelocationNoVisa.accepted, false);
+
+  // 5. Country-locked foreign remote ("Remote in USA" / "Remote in Canada") -> REJECTED
+  const usOnlyRemote = evaluateJobAgainstProfile(
+    {
+      sourceName: 'remotive',
+      sourceUrl: 'https://remotive.com/jobs/105',
+      title: 'Frontend Developer Intern',
+      companyName: 'USRemoteCo',
+      locationText: 'Remote in USA',
+      description: 'Work remotely with React and TypeScript. Must reside in the United States.',
+      explicitEmploymentType: 'internship',
+      explicitWorkArrangement: 'remote',
+    },
+    internOnlyProfile,
+  );
+  assert.equal(usOnlyRemote.accepted, false);
+
+  // 6. True global / WFH-supported remote -> ACCEPTED
+  const globalRemote = evaluateJobAgainstProfile(
+    {
+      sourceName: 'remotive',
+      sourceUrl: 'https://remotive.com/jobs/106',
+      title: 'Full Stack Developer Intern',
+      companyName: 'GlobalRemoteCo',
+      locationText: 'Remote (Worldwide)',
+      salaryText: '$1,500 / month',
+      description: 'Work from anywhere with our distributed React and Node.js team.',
+      explicitEmploymentType: 'internship',
+      explicitWorkArrangement: 'remote',
+    },
+    internOnlyProfile,
+  );
+  assert.equal(globalRemote.accepted, true);
+  assert.equal(globalRemote.countryScope, 'remote_global');
+});
+
+test('unwraps Google redirect links, matches realistic LinkedIn founder snippets, and never puts job URLs in recipientTarget', async () => {
+  // 1. Google redirect unwrapping
+  const unwrapped = unwrapRedirectUrlSync('https://www.google.com/goto?url=https%3A%2F%2Fwellfound.com%2Fjobs%2F5137293');
+  assert.equal(unwrapped, 'https://wellfound.com/jobs/5137293');
+
+  // 2. Realistic LinkedIn format ("Name - Co-Founder - Isomorph AI | LinkedIn" + "Experience: Isomorph AI") -> ACCEPTED
+  const founderHit = verifyLinkedinSearchHit(
+    {
+      url: 'https://in.linkedin.com/in/aarav-shah-isomorph',
+      title: 'Aarav Shah - Co-Founder & CTO - Isomorph AI | LinkedIn',
+      description: 'Building AI software tools. Experience: Isomorph AI · Education: IIT Delhi · Location: Bengaluru.',
+    },
+    'Isomorph AI',
+    'isomorph.ai',
+  );
+  assert.equal(founderHit.accepted, true);
+  assert.equal(founderHit.contactType, 'founder');
+
+  // 3. Fallback pitch when 0 contacts found MUST set recipientTarget = null (never paste the job link)
+  const fallback = await generateGroundedDraftProposals(
+    {
+      sourceName: 'firecrawl',
+      sourceUrl: 'https://wellfound.com/jobs/5137293-software-engineering-intern',
+      title: 'Software Engineering Intern',
+      companyName: 'Isomorph AI',
+    },
+    ['TypeScript', 'React'],
+    [],
+    internOnlyProfile,
+    { enabled: false, baseUrl: 'http://127.0.0.1:11434', model: null },
+    80,
+  );
+  assert.equal(fallback.length, 1);
+  assert.equal(fallback[0].recipientTarget, null);
+
+  // 4. skipFallbackIfNoContacts prevents duplicate pitches when clicking Find Real People
+  const skipped = await generateGroundedDraftProposals(
+    {
+      sourceName: 'firecrawl',
+      sourceUrl: 'https://wellfound.com/jobs/5137293-software-engineering-intern',
+      title: 'Software Engineering Intern',
+      companyName: 'Isomorph AI',
+    },
+    ['TypeScript'],
+    [],
+    internOnlyProfile,
+    { enabled: false, baseUrl: 'http://127.0.0.1:11434', model: null },
+    80,
+    { skipFallbackIfNoContacts: true },
+  );
+  assert.equal(skipped.length, 0);
 });

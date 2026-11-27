@@ -17,7 +17,7 @@ import {
 } from '../config/user-runtime-config.js';
 import { isValidEmailAddress, sendApprovedEmail, verifySmtpConnection } from '../mail/mailer.js';
 import { requireAuth } from '../middleware/auth.js';
-import { firecrawlWebSearch } from '../discovery/connectors.js';
+import { firecrawlWebSearch, unwrapRedirectUrlSync } from '../discovery/connectors.js';
 import { buildMasterCoverLetterPack } from '../discovery/cover-letter.js';
 import {
   discoverCompanyContacts,
@@ -220,6 +220,9 @@ export function createDiscoveryRouter(
         contacts: contactList.length,
         pendingDrafts: draftList.filter((d) => d.status === 'pending_review').length,
         approvedDrafts: draftList.filter((d) => d.status === 'approved' || d.status === 'sent_externally').length,
+        approvedReady: draftList.filter((d) => d.status === 'approved').length,
+        sentDrafts: draftList.filter((d) => d.status === 'sent_externally').length,
+        rejectedDrafts: draftList.filter((d) => d.status === 'rejected').length,
       },
       activeRunId,
       latestRun: latestRun
@@ -250,12 +253,19 @@ export function createDiscoveryRouter(
     const userId = request.auth!.id;
     const rows = db.select().from(jobOpportunities).where(eq(jobOpportunities.userId, userId)).all();
     const contacts = db.select({ jobId: companyContacts.jobId }).from(companyContacts).where(eq(companyContacts.userId, userId)).all();
-    const drafts = db.select({ jobId: outreachDrafts.jobId }).from(outreachDrafts).where(eq(outreachDrafts.userId, userId)).all();
+    const drafts = db.select({ jobId: outreachDrafts.jobId, status: outreachDrafts.status }).from(outreachDrafts).where(eq(outreachDrafts.userId, userId)).all();
 
     const contactCountByJob = new Map<string, number>();
     for (const c of contacts) if (c.jobId) contactCountByJob.set(c.jobId, (contactCountByJob.get(c.jobId) ?? 0) + 1);
-    const draftCountByJob = new Map<string, number>();
-    for (const d of drafts) draftCountByJob.set(d.jobId, (draftCountByJob.get(d.jobId) ?? 0) + 1);
+    const pendingDraftCountByJob = new Map<string, number>();
+    const reviewedDraftCountByJob = new Map<string, number>();
+    for (const d of drafts) {
+      if (d.status === 'pending_review') {
+        pendingDraftCountByJob.set(d.jobId, (pendingDraftCountByJob.get(d.jobId) ?? 0) + 1);
+      } else {
+        reviewedDraftCountByJob.set(d.jobId, (reviewedDraftCountByJob.get(d.jobId) ?? 0) + 1);
+      }
+    }
 
     const search = typeof request.query.search === 'string' ? request.query.search.trim().toLowerCase() : '';
     const workArrangement = typeof request.query.workArrangement === 'string' ? request.query.workArrangement : 'all';
@@ -325,7 +335,9 @@ export function createDiscoveryRouter(
         verificationStatus: job.verificationStatus,
         applicationStatus: job.applicationStatus,
         contactCount: contactCountByJob.get(job.id) ?? 0,
-        draftCount: draftCountByJob.get(job.id) ?? 0,
+        draftCount: pendingDraftCountByJob.get(job.id) ?? 0,
+        pendingDraftCount: pendingDraftCountByJob.get(job.id) ?? 0,
+        reviewedDraftCount: reviewedDraftCountByJob.get(job.id) ?? 0,
         postedAt: job.postedAt?.toISOString() ?? null,
         discoveredAt: job.discoveredAt.toISOString(),
       }));
@@ -558,13 +570,17 @@ export function createDiscoveryRouter(
       return;
     }
     const runtime = getUserRuntimeConfig(userId);
+    const companyRow = job.companyId
+      ? db.select({ websiteUrl: companies.websiteUrl }).from(companies).where(eq(companies.id, job.companyId)).get()
+      : null;
 
     const rawJob: RawDiscoveredJob = {
       sourceName: job.sourceName,
-      sourceUrl: job.sourceUrl,
-      applyUrl: job.applyUrl,
+      sourceUrl: unwrapRedirectUrlSync(job.sourceUrl),
+      applyUrl: job.applyUrl ? unwrapRedirectUrlSync(job.applyUrl) : unwrapRedirectUrlSync(job.sourceUrl),
       title: job.title,
       companyName: job.companyName,
+      companyWebsite: companyRow?.websiteUrl ?? null,
       locationText: job.locationText,
       salaryText: job.salaryText,
       description: job.description,
@@ -581,7 +597,19 @@ export function createDiscoveryRouter(
       deepLookup: true,
       firecrawlApiKey: runtime.firecrawlApiKey,
       githubToken: runtime.githubToken,
+      ollama: {
+        enabled: Boolean(runtime.ollamaModel),
+        baseUrl: runtime.ollamaBaseUrl,
+        model: runtime.ollamaModel,
+      },
     });
+
+    if (discovery.diagnostics.resolvedDomain && job.companyId && !companyRow?.websiteUrl) {
+      db.update(companies)
+        .set({ websiteUrl: `https://${discovery.diagnostics.resolvedDomain}`, updatedAt: new Date() })
+        .where(eq(companies.id, job.companyId))
+        .run();
+    }
 
     const mergedContacts = [...existingContacts.map((c) => ({
       id: c.id,
@@ -596,7 +624,7 @@ export function createDiscoveryRouter(
       confidence: c.confidence,
     }))];
 
-    let newContactsAdded = 0;
+    const newlyAddedContacts: typeof mergedContacts = [];
     for (const contact of discovery.contacts) {
       const dup = mergedContacts.some(
         (c) =>
@@ -623,14 +651,28 @@ export function createDiscoveryRouter(
           confidence: contact.confidence,
         })
         .run();
-      mergedContacts.push({ id: contactId, ...contact });
-      newContactsAdded += 1;
+      const inserted = { id: contactId, ...contact };
+      mergedContacts.push(inserted);
+      newlyAddedContacts.push(inserted);
     }
+
+    const existingDraftsForJob = db
+      .select({ id: outreachDrafts.id, contactId: outreachDrafts.contactId, channel: outreachDrafts.channel })
+      .from(outreachDrafts)
+      .where(and(eq(outreachDrafts.userId, userId), eq(outreachDrafts.jobId, job.id)))
+      .all();
+
+    // Only draft for newly discovered real contacts—or for existing real contacts that don't have a draft yet.
+    // Never duplicate generic "no verified person found yet" pitches when clicking Find Real People!
+    const draftedContactIds = new Set(existingDraftsForJob.map((d) => d.contactId).filter(Boolean));
+    const contactsToDraft = newlyAddedContacts.length > 0
+      ? newlyAddedContacts
+      : mergedContacts.filter((c) => !draftedContactIds.has(c.id));
 
     const proposals = await generateGroundedDraftProposals(
       rawJob,
       safeParseArray(job.matchedSkillsJson),
-      mergedContacts,
+      contactsToDraft,
       profile,
       {
         enabled: Boolean(runtime.ollamaModel),
@@ -638,13 +680,14 @@ export function createDiscoveryRouter(
         model: runtime.ollamaModel,
       },
       job.matchScore,
+      { skipFallbackIfNoContacts: existingDraftsForJob.length > 0 },
     );
 
     let created = 0;
     for (const proposal of proposals) {
       const linkedContactId =
-        proposal.contactIndex !== null && mergedContacts[proposal.contactIndex]
-          ? mergedContacts[proposal.contactIndex].id
+        proposal.contactIndex !== null && contactsToDraft[proposal.contactIndex]
+          ? contactsToDraft[proposal.contactIndex].id
           : null;
       db.insert(outreachDrafts)
         .values({
@@ -669,8 +712,9 @@ export function createDiscoveryRouter(
     response.status(201).json({
       created,
       contactsCount: mergedContacts.length,
-      newContactsAdded,
+      newContactsAdded: newlyAddedContacts.length,
       firecrawlUsed: discovery.firecrawlCreditsUsed > 0,
+      diagnostics: discovery.diagnostics,
     });
   });
 
@@ -788,6 +832,18 @@ export function createDiscoveryRouter(
     const rows = db.select().from(outreachDrafts).where(eq(outreachDrafts.userId, userId)).orderBy(desc(outreachDrafts.createdAt)).all();
     const jobs = db.select({ id: jobOpportunities.id, sourceUrl: jobOpportunities.sourceUrl, applyUrl: jobOpportunities.applyUrl }).from(jobOpportunities).where(eq(jobOpportunities.userId, userId)).all();
     const jobMap = new Map(jobs.map((j) => [j.id, j]));
+    const contactRows = db
+      .select({
+        id: companyContacts.id,
+        confidence: companyContacts.confidence,
+        platform: companyContacts.platform,
+        sourceUrl: companyContacts.sourceUrl,
+        sourceNote: companyContacts.sourceNote,
+      })
+      .from(companyContacts)
+      .where(eq(companyContacts.userId, userId))
+      .all();
+    const contactMap = new Map(contactRows.map((c) => [c.id, c]));
 
     const status = typeof request.query.status === 'string' ? request.query.status : 'all';
     const channel = typeof request.query.channel === 'string' ? request.query.channel : 'all';
@@ -802,8 +858,17 @@ export function createDiscoveryRouter(
       })
       .map((d) => {
         const linkedJob = jobMap.get(d.jobId);
+        const linkedContact = d.contactId ? contactMap.get(d.contactId) ?? null : null;
         return {
           id: d.id,
+          contactProof: linkedContact
+            ? {
+                confidence: linkedContact.confidence,
+                platform: linkedContact.platform,
+                sourceUrl: linkedContact.sourceUrl,
+                sourceNote: linkedContact.sourceNote,
+              }
+            : null,
           jobId: d.jobId,
           contactId: d.contactId,
           companyName: d.companyName,
@@ -812,8 +877,8 @@ export function createDiscoveryRouter(
           recipientLabel: d.recipientLabel,
           recipientTarget: d.recipientTarget,
           targetKind: classifyDraftTarget(d.recipientTarget, d.channel),
-          jobSourceUrl: linkedJob?.sourceUrl ?? null,
-          jobApplyUrl: linkedJob?.applyUrl ?? null,
+          jobSourceUrl: linkedJob?.sourceUrl ? unwrapRedirectUrlSync(linkedJob.sourceUrl) : null,
+          jobApplyUrl: linkedJob?.applyUrl ? unwrapRedirectUrlSync(linkedJob.applyUrl) : null,
           subject: d.subject,
           body: d.body,
           groundingFacts: safeParseArray(d.groundingFactsJson),

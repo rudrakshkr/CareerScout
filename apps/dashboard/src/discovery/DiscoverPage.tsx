@@ -86,6 +86,7 @@ export default function DiscoverPage({ onDataChanged }: { onDataChanged?: () => 
         discoveryApi.summary(),
       ]);
       setJobs(jobsRes.jobs);
+      setSelectedJob((curr) => (curr ? jobsRes.jobs.find((j) => j.id === curr.id) ?? curr : null));
       setActiveRunId(summaryRes.activeRunId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load discovered jobs.');
@@ -415,9 +416,19 @@ export default function DiscoverPage({ onDataChanged }: { onDataChanged?: () => 
                 <button
                   type="button"
                   className="cs-btn cs-btn-sm cs-btn-accent-soft"
-                  onClick={() => navigate(`/outreach?jobId=${encodeURIComponent(job.id)}`)}
+                  onClick={() => {
+                    const pending = job.pendingDraftCount ?? job.draftCount;
+                    const reviewed = job.reviewedDraftCount ?? 0;
+                    const target = pending === 0 && reviewed > 0 ? '/reviewed' : '/outreach';
+                    navigate(`${target}?jobId=${encodeURIComponent(job.id)}`);
+                  }}
                 >
-                  <Mail size={13} />{job.draftCount} draft{job.draftCount === 1 ? '' : 's'}
+                  <Mail size={13} />
+                  {(job.pendingDraftCount ?? job.draftCount) > 0
+                    ? `${job.pendingDraftCount ?? job.draftCount} draft${(job.pendingDraftCount ?? job.draftCount) === 1 ? '' : 's'}`
+                    : (job.reviewedDraftCount ?? 0) > 0
+                      ? `${job.reviewedDraftCount} reviewed`
+                      : '0 drafts'}
                 </button>
                 <button
                   type="button"
@@ -489,8 +500,17 @@ export default function DiscoverPage({ onDataChanged }: { onDataChanged?: () => 
                       className="cs-btn cs-btn-sm cs-btn-accent-soft"
                       onClick={() => navigate(`/outreach?jobId=${encodeURIComponent(selectedJob.id)}`)}
                     >
-                      <Mail size={14} />Review {selectedJob.draftCount} draft{selectedJob.draftCount === 1 ? '' : 's'}
+                      <Mail size={14} />Review {selectedJob.pendingDraftCount ?? selectedJob.draftCount} draft{(selectedJob.pendingDraftCount ?? selectedJob.draftCount) === 1 ? '' : 's'}
                     </button>
+                    {(selectedJob.reviewedDraftCount ?? 0) > 0 && (
+                      <button
+                        type="button"
+                        className="cs-btn cs-btn-sm"
+                        onClick={() => navigate(`/reviewed?jobId=${encodeURIComponent(selectedJob.id)}`)}
+                      >
+                        Reviewed ({selectedJob.reviewedDraftCount})
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="cs-btn cs-btn-sm"

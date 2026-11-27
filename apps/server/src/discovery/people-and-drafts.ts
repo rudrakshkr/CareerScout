@@ -1,5 +1,6 @@
 import { ollamaChatText } from '../ai/ollama.js';
-import { firecrawlWebSearch } from './connectors.js';
+import { verifyCurrentEmployeeWithAi, type OllamaRuntimeOptions } from '../ai/verifiers.js';
+import { firecrawlWebSearch, resolveRedirectUrl, type FirecrawlSearchHit } from './connectors.js';
 import type { RawDiscoveredJob, UserProfileContext } from './types.js';
 
 export interface DiscoveredContactCandidate {
@@ -14,6 +15,16 @@ export interface DiscoveredContactCandidate {
   confidence: 'verified' | 'likely' | 'search_lead';
 }
 
+export interface ContactDiscoveryDiagnostics {
+  resolvedDomain: string | null;
+  linkedinHitsReturned: number;
+  linkedinRejected: number;
+  founderWebHits: number;
+  siteEmailsFound: number;
+  githubMembersFound: number;
+  firecrawlError: string | null;
+}
+
 export interface GeneratedDraftProposal {
   channel: 'email' | 'linkedin_dm' | 'linkedin_note' | 'referral_request' | 'cover_letter' | 'other';
   recipientLabel: string;
@@ -24,20 +35,213 @@ export interface GeneratedDraftProposal {
   contactIndex: number | null;
 }
 
-export interface TailoredApplicationPack {
-  jobTitle: string;
-  companyName: string;
-  tailoredHeadline: string;
-  tailoredSummary: string;
-  matchedSkills: string[];
-  highlightedProjects: Array<{ name: string; pitch: string; url: string | null }>;
-  coverLetter: string;
-  markdownExport: string;
-  generatedWithAi: boolean;
+const PUBLIC_EMAIL_REGEX = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
+const IGNORED_EMAIL_PREFIX = /^(?:noreply|no-reply|donotreply|privacy|legal|support|abuse|security|press|media|dmca|billing|accessibility|info@example|example@|sentry@|notifications@)/iu;
+const GENERIC_JOB_HOSTS = /(?:greenhouse\.io|lever\.co|ashbyhq\.com|remotive\.com|remotefirstjobs\.com|arbeitnow\.com|jobicy\.com|ycombinator\.com|linkedin\.com|wellfound\.com|internshala\.com|cutshort\.io|github\.com|forms\.gle|docs\.google\.com|google\.com|wikipedia\.org|crunchbase\.com|glassdoor\.com|indeed\.com|ambitionbox\.com|tracxn\.com|pitchbook\.com|zoominfo\.com|rocketreach\.co|apollo\.io|lusha\.com|signalhire\.com|facebook\.com|instagram\.com|youtube\.com)$/iu;
+
+export function cleanCompanyNameForLookup(raw: string): string {
+  return raw
+    .split(/[•·|]/u)[0]
+    .replace(/\b(?:inc\.?|ltd\.?|llc|corp\.?|corporation|pvt\.?|private|limited|technologies|technology|software)\b/giu, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
-const PUBLIC_EMAIL_REGEX = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
-const IGNORED_EMAIL_PREFIX = /^(?:noreply|no-reply|donotreply|privacy|legal|support|abuse|security|press|media|dmca|billing|accessibility|info@example|example@)/iu;
+export function extractDomainHost(urlLike: string | null | undefined): string | null {
+  if (!urlLike) return null;
+  const trimmed = urlLike.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(/^https?:\/\//iu.test(trimmed) ? trimmed : `https://${trimmed}`);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./u, '');
+    if (!host || GENERIC_JOB_HOSTS.test(host)) return null;
+    return host;
+  } catch {
+    return null;
+  }
+}
+
+export function sanitizeBioRole(bio: string | null | undefined, fallback: string): string {
+  const cleaned = (bio ?? '').replace(/\s+/gu, ' ').trim();
+  const alphaCount = (cleaned.match(/[a-zA-Z]/gu) ?? []).length;
+  if (alphaCount < 6) return fallback;
+  return cleaned.slice(0, 95);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+export function indicatesFormerEmployeeAtCompany(text: string, companyName: string): boolean {
+  const cleanCompany = cleanCompanyNameForLookup(companyName);
+  if (cleanCompany.length < 2) return false;
+  const escaped = escapeRegExp(cleanCompany);
+
+  const formerBeforeCompany = new RegExp(
+    `\\b(?:ex[\\s-]*|former(?:ly)?(?:\\s+\\w+){0,4}\\s+(?:at|@|of|with)?\\s*|previously(?:\\s+\\w+){0,4}\\s+(?:at|@|with)?\\s*|past(?:\\s+experience)?:?\\s*(?:[^.|;\\n]{0,30})?|worked\\s+at\\s+|alumni\\s+(?:of|at)\\s+)${escaped}(?:$|[^a-z0-9])`,
+    'iu',
+  );
+  if (formerBeforeCompany.test(text)) return true;
+
+  const companyThenFormer = new RegExp(
+    `(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])\\s*(?:alumni|alumnus|alumna|former\\s+employee)`,
+    'iu',
+  );
+  if (companyThenFormer.test(text)) return true;
+
+  const endedRangeNearCompany = new RegExp(
+    `(?:^|[^a-z0-9])${escaped}[^.\\n]{0,45}\\b(?:19|20)\\d{2}\\s*(?:-|–|—|to)\\s*(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+)?(20\\d{2})\\b`,
+    'iu',
+  );
+  const endedMatch = text.match(endedRangeNearCompany);
+  if (endedMatch && !new RegExp(`(?:^|[^a-z0-9])${escaped}[^.\\n]{0,55}\\b(?:present|current(?:ly)?|now)\\b`, 'iu').test(text)) {
+    const endYear = Number(endedMatch[1]);
+    const currentYear = new Date().getFullYear();
+    if (Number.isFinite(endYear) && endYear <= currentYear) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function isValidGithubOrgMatch(options: {
+  companyName: string;
+  companyDomain: string | null;
+  orgLogin: string;
+  orgName: string | null;
+  orgBlog: string | null;
+}): boolean {
+  const cleanCompany = cleanCompanyNameForLookup(options.companyName);
+  const companySlug = cleanCompany.toLowerCase().replace(/[^a-z0-9]/gu, '');
+  const orgSlug = options.orgLogin.toLowerCase().replace(/[^a-z0-9]/gu, '');
+  const orgDisplaySlug = cleanCompanyNameForLookup(options.orgName ?? '').toLowerCase().replace(/[^a-z0-9]/gu, '');
+  const orgDomain = extractDomainHost(options.orgBlog);
+
+  if (companySlug.length < 2) return false;
+
+  if (options.companyDomain && orgDomain) {
+    if (orgDomain === options.companyDomain || orgDomain.endsWith(`.${options.companyDomain}`)) {
+      return true;
+    }
+    return false;
+  }
+
+  if (companySlug.length <= 4) return false;
+  return orgSlug === companySlug || (orgDisplaySlug.length >= 5 && orgDisplaySlug === companySlug);
+}
+
+export function verifyLinkedinSearchHit(
+  hit: FirecrawlSearchHit,
+  companyName: string,
+  companyDomain: string | null,
+): {
+  accepted: boolean;
+  personName: string;
+  personRole: string;
+  evidenceSnippet: string;
+  contactType: DiscoveredContactCandidate['contactType'];
+} {
+  const reject = {
+    accepted: false,
+    personName: '',
+    personRole: '',
+    evidenceSnippet: '',
+    contactType: 'other' as const,
+  };
+
+  if (!/linkedin\.com\/in\/[^/?#]+/iu.test(hit.url)) return reject;
+
+  const cleanCompany = cleanCompanyNameForLookup(companyName);
+  if (cleanCompany.length < 2) return reject;
+
+  const cleanedTitle = hit.title.replace(/\s*\|\s*LinkedIn.*$/iu, '').trim();
+  const titleParts = cleanedTitle.split(/\s+-\s+|\s+–\s+|\s+\|\s+/u).map((p) => p.trim()).filter(Boolean);
+  const personName = titleParts[0] || '';
+  const headlineParts = titleParts.slice(1);
+  const personRole = headlineParts.join(' · ');
+
+  if (!personName || personName.length < 3 || personName.length > 60) return reject;
+  if (/\b(?:profiles?|jobs?|hiring|top\s+\d+|linkedin)\b/iu.test(personName)) return reject;
+
+  const snippet = (hit.description || hit.markdown || '').replace(/\s+/gu, ' ').trim();
+  const fullContext = `${cleanedTitle}\n${snippet}`;
+
+  // HARD REJECT any ex-employee / former employee / ended tenure at the target company
+  if (indicatesFormerEmployeeAtCompany(fullContext, cleanCompany)) {
+    return reject;
+  }
+
+  const companyEscaped = escapeRegExp(cleanCompany);
+  const wholeWordCompany = new RegExp(`(?:^|[^a-z0-9])${companyEscaped}(?:$|[^a-z0-9])`, 'iu');
+
+  // LinkedIn standard snippet: "Experience: <Current Company> · Education: ..."
+  const experienceHeaderMatch = snippet.match(/\bExperience:\s*([^·|.\n]{2,65})/iu);
+  const experienceCurrentCompany = experienceHeaderMatch?.[1]?.trim() ?? '';
+  const experienceMatchesTarget = Boolean(experienceCurrentCompany && wholeWordCompany.test(experienceCurrentCompany));
+
+  // If LinkedIn explicitly lists a DIFFERENT current employer in "Experience: <OtherCo>" -> reject
+  if (experienceCurrentCompany && !experienceMatchesTarget && !wholeWordCompany.test(personRole)) {
+    return reject;
+  }
+
+  // If headline explicitly states "at <OtherCompany>" -> reject
+  const explicitAtMatch = personRole.match(/\b(?:at|@)\s+([A-Za-z0-9][A-Za-z0-9.&' -]{1,40})/iu);
+  if (explicitAtMatch?.[1] && !wholeWordCompany.test(explicitAtMatch[1]) && !experienceMatchesTarget) {
+    return reject;
+  }
+
+  // If title follows "Name - Role - OtherCompany" without matching target -> reject
+  if (headlineParts.length >= 2 && !experienceMatchesTarget) {
+    const trailingEmployer = headlineParts[headlineParts.length - 1];
+    const looksLikeRoleOrTagline = /\b(?:engineer|developer|manager|recruiter|lead|founder|cto|ceo|talent|product|software|full[\s-]?stack|front[\s-]?end|back[\s-]?end|hiring|saas|ai|b2b|building|scaling|helping)\b/iu.test(trailingEmployer);
+    if (!looksLikeRoleOrTagline && !wholeWordCompany.test(trailingEmployer) && !wholeWordCompany.test(personRole)) {
+      return reject;
+    }
+  }
+
+  const domainMatched = Boolean(companyDomain && new RegExp(escapeRegExp(companyDomain), 'iu').test(fullContext));
+  const titleMentionsCompany = headlineParts.some((part) => wholeWordCompany.test(part));
+  const currentEmploymentPattern = new RegExp(
+    `(?:(?:\\bat\\b|@|current(?:ly)?:?|experience:|building|founder\\s+of|co-?founder\\s+of)\\s*[^.;|\\n]{0,35}(?:^|[^a-z0-9])${companyEscaped}(?:$|[^a-z0-9])|(?:^|[^a-z0-9])${companyEscaped}(?:$|[^a-z0-9])\\s*(?:·|\\||-|–|,)\\s*(?:present|current|full[- ]time|engineer|recruiter|founder|manager|lead|developer|cto|ceo))`,
+    'iu',
+  );
+  const snippetShowsCurrentEmployment = experienceMatchesTarget || currentEmploymentPattern.test(snippet);
+
+  const isShortAmbiguousName = cleanCompany.replace(/[^a-z0-9]/gu, '').length <= 4;
+  if (isShortAmbiguousName) {
+    const strictTitleEmployer =
+      new RegExp(`(?:\\bat\\b|@|^)\\s*${companyEscaped}\\s*$`, 'iu').test(headlineParts[headlineParts.length - 1] ?? '')
+      || new RegExp(`(?:\\bat\\b|@)\\s*${companyEscaped}(?:$|[^a-z0-9])`, 'iu').test(personRole);
+    if (!domainMatched && !strictTitleEmployer && !snippetShowsCurrentEmployment) {
+      return reject;
+    }
+  } else {
+    if (!domainMatched && !titleMentionsCompany && !snippetShowsCurrentEmployment) {
+      return reject;
+    }
+  }
+
+  if (/\b(?:open\s+to\s+work|seeking\s+opportunities|incoming\s+intern)\b/iu.test(personRole)) {
+    return reject;
+  }
+
+  const isFounder = /\b(?:co-?founder|founder|ceo|cto)\b/iu.test(personRole);
+  const isRecruiter = /\b(?:recruiter|talent|hr|people\s+ops|hiring)\b/iu.test(personRole);
+  const isManager = /\b(?:manager|lead|head\s+of|director|vp)\b/iu.test(personRole);
+
+  const evidenceSnippet = snippet
+    ? snippet.slice(0, 220)
+    : `LinkedIn headline: ${cleanedTitle}`;
+
+  return {
+    accepted: true,
+    personName,
+    personRole: (personRole || `Team Member at ${cleanCompany}`).slice(0, 130),
+    evidenceSnippet,
+    contactType: isFounder ? 'founder' : isRecruiter ? 'recruiter' : isManager ? 'hiring_manager' : 'engineer_referral',
+  };
+}
 
 export function extractPublicEmails(text: string): string[] {
   const matches = text.match(PUBLIC_EMAIL_REGEX) ?? [];
@@ -46,24 +250,65 @@ export function extractPublicEmails(text: string): string[] {
   for (const raw of matches) {
     const email = raw.trim().toLowerCase();
     if (IGNORED_EMAIL_PREFIX.test(email) || seen.has(email)) continue;
-    if (/\.(?:png|jpg|jpeg|svg|gif|webp|css|js)$/iu.test(email)) continue;
+    if (/\.(?:png|jpg|jpeg|svg|gif|webp|css|js|woff2?)$/iu.test(email)) continue;
     seen.add(email);
     valid.push(email);
   }
   return valid;
 }
 
+async function resolveCompanyOfficialWebsite(
+  companyName: string,
+  firecrawlApiKey: string,
+): Promise<{ websiteUrl: string | null; domain: string | null; creditsUsed: number; error: string | null }> {
+  const cleanCompany = cleanCompanyNameForLookup(companyName);
+  if (cleanCompany.length < 2) return { websiteUrl: null, domain: null, creditsUsed: 0, error: null };
+
+  const res = await firecrawlWebSearch({
+    apiKey: firecrawlApiKey,
+    query: `"${cleanCompany}" official website OR careers`,
+    limit: 5,
+  });
+
+  if (!res.ok) return { websiteUrl: null, domain: null, creditsUsed: 1, error: res.error };
+
+  const compactSlug = cleanCompany.toLowerCase().replace(/[^a-z0-9]/gu, '');
+  const firstToken = cleanCompany.toLowerCase().split(/\s+/u)[0] ?? '';
+
+  for (const hit of res.hits) {
+    const domain = extractDomainHost(hit.url);
+    if (!domain) continue;
+    const domainNoTld = domain.split('.')[0]?.replace(/[^a-z0-9]/gu, '') ?? '';
+    if (
+      domainNoTld === compactSlug
+      || (compactSlug.length >= 4 && domainNoTld.includes(compactSlug))
+      || (firstToken.length >= 5 && domainNoTld.includes(firstToken))
+    ) {
+      try {
+        return { websiteUrl: new URL(hit.url).origin, domain, creditsUsed: 1, error: null };
+      } catch {
+        continue;
+      }
+    }
+  }
+  return { websiteUrl: null, domain: null, creditsUsed: 1, error: null };
+}
+
 async function resolveGithubOrgPeople(
   companyName: string,
+  companyDomain: string | null,
   githubToken: string | null,
+  jobTitle: string,
+  ollama?: OllamaRuntimeOptions,
 ): Promise<DiscoveredContactCandidate[]> {
-  const cleanName = companyName.replace(/\b(?:inc\.?|ltd\.?|llc|corp\.?|technologies|labs?|software|private|limited)\b/giu, '').trim();
+  const cleanName = cleanCompanyNameForLookup(companyName);
   const guessedSlug = cleanName.toLowerCase().replace(/[^a-z0-9]/gu, '');
   if (guessedSlug.length < 2) return [];
+  if (guessedSlug.length <= 4 && !companyDomain) return [];
 
   const ghHeaders: Record<string, string> = {
     Accept: 'application/vnd.github+json',
-    'User-Agent': 'CareerScout-Local/0.4',
+    'User-Agent': 'CareerScout-Local/0.7',
   };
   if (githubToken?.trim()) {
     ghHeaders.Authorization = `Bearer ${githubToken.trim()}`;
@@ -79,51 +324,58 @@ async function resolveGithubOrgPeople(
     }
   };
 
-  // 1. Resolve actual GitHub organization login (try exact slug first, then search)
-  let orgLogin: string | null = null;
-  const directOrg = await ghFetch<{ login?: string; type?: string }>(`https://api.github.com/orgs/${encodeURIComponent(guessedSlug)}`);
-  if (directOrg?.login) {
-    orgLogin = directOrg.login;
-  } else {
+  type GhOrg = { login?: string; name?: string | null; blog?: string | null; html_url?: string };
+
+  let verifiedOrg: GhOrg | null = null;
+  const directOrg = await ghFetch<GhOrg>(`https://api.github.com/orgs/${encodeURIComponent(guessedSlug)}`);
+  if (
+    directOrg?.login
+    && isValidGithubOrgMatch({
+      companyName: cleanName,
+      companyDomain,
+      orgLogin: directOrg.login,
+      orgName: directOrg.name ?? null,
+      orgBlog: directOrg.blog ?? null,
+    })
+  ) {
+    verifiedOrg = directOrg;
+  }
+
+  if (!verifiedOrg && (guessedSlug.length >= 5 || companyDomain)) {
+    const searchQuery = companyDomain ? `${cleanName} ${companyDomain} type:org` : `${cleanName} type:org`;
     const searchRes = await ghFetch<{ items?: Array<{ login?: string }> }>(
-      `https://api.github.com/search/users?q=${encodeURIComponent(`${cleanName} type:org`)}&per_page=2`,
+      `https://api.github.com/search/users?q=${encodeURIComponent(searchQuery)}&per_page=3`,
     );
-    const candidateLogin = searchRes?.items?.[0]?.login;
-    if (candidateLogin && candidateLogin.toLowerCase().includes(guessedSlug.slice(0, Math.min(4, guessedSlug.length)))) {
-      orgLogin = candidateLogin;
-    }
-  }
-  if (!orgLogin) return [];
-
-  // 2. Collect candidate usernames from public members OR active top repo contributors
-  const logins: string[] = [];
-  const members = await ghFetch<Array<{ login?: string }>>(
-    `https://api.github.com/orgs/${encodeURIComponent(orgLogin)}/public_members?per_page=5`,
-  );
-  for (const m of members ?? []) {
-    if (m.login && !logins.includes(m.login)) logins.push(m.login);
-  }
-
-  if (logins.length === 0) {
-    const repos = await ghFetch<Array<{ name?: string; fork?: boolean }>>(
-      `https://api.github.com/orgs/${encodeURIComponent(orgLogin)}/repos?sort=updated&per_page=3`,
-    );
-    const mainRepo = (repos ?? []).find((r) => r.name && !r.fork);
-    if (mainRepo?.name) {
-      const contributors = await ghFetch<Array<{ login?: string; type?: string }>>(
-        `https://api.github.com/repos/${encodeURIComponent(orgLogin)}/${encodeURIComponent(mainRepo.name)}/contributors?per_page=5`,
-      );
-      for (const c of contributors ?? []) {
-        if (c.login && c.type === 'User' && !/bot$/iu.test(c.login) && !logins.includes(c.login)) {
-          logins.push(c.login);
-        }
+    for (const item of searchRes?.items ?? []) {
+      if (!item.login) continue;
+      const orgDetails = await ghFetch<GhOrg>(`https://api.github.com/orgs/${encodeURIComponent(item.login)}`);
+      if (
+        orgDetails?.login
+        && isValidGithubOrgMatch({
+          companyName: cleanName,
+          companyDomain,
+          orgLogin: orgDetails.login,
+          orgName: orgDetails.name ?? null,
+          orgBlog: orgDetails.blog ?? null,
+        })
+      ) {
+        verifiedOrg = orgDetails;
+        break;
       }
     }
   }
 
-  // 3. Resolve each engineer's real GitHub profile (real name, bio, public email, blog/LinkedIn)
+  if (!verifiedOrg?.login) return [];
+  const orgLogin = verifiedOrg.login;
+
+  const members = await ghFetch<Array<{ login?: string }>>(
+    `https://api.github.com/orgs/${encodeURIComponent(orgLogin)}/public_members?per_page=6`,
+  );
+  const logins = (members ?? []).map((m) => m.login).filter((l): l is string => Boolean(l));
+  if (logins.length === 0) return [];
+
   const resolved: DiscoveredContactCandidate[] = [];
-  for (const login of logins.slice(0, 3)) {
+  for (const login of logins.slice(0, 4)) {
     const user = await ghFetch<{
       name?: string | null;
       bio?: string | null;
@@ -139,53 +391,90 @@ async function resolveGithubOrgPeople(
     const email = user.email?.trim() || null;
     if (!realName && !email) continue;
 
-    const bioRole = user.bio?.replace(/\s+/gu, ' ').trim().slice(0, 95) || `Engineer at ${companyName} (@${login})`;
-    const isManager = /\b(?:manager|lead|cto|vp|head\s+of|founder|director|staff|principal)\b/iu.test(bioRole);
+    const companyField = (user.company ?? '').trim();
+    const bioField = (user.bio ?? '').trim();
+    if (indicatesFormerEmployeeAtCompany(`${companyField}\n${bioField}`, cleanName)) continue;
+
+    if (companyField) {
+      const normCompanyField = companyField.replace(/^@/u, '').toLowerCase();
+      const matchesTarget =
+        normCompanyField.includes(cleanName.toLowerCase())
+        || normCompanyField.includes(orgLogin.toLowerCase());
+      if (!matchesTarget) continue;
+    }
+
+    const fallbackRole = `Engineer at ${cleanName} (@${orgLogin} GitHub member)`;
+    const roleTitle = sanitizeBioRole(user.bio, fallbackRole);
+    const isManager = /\b(?:manager|lead|cto|vp|head\s+of|founder|director|staff|principal)\b/iu.test(roleTitle);
     const blogRaw = user.blog?.trim() || '';
     const blogUrl = blogRaw ? (/^https?:\/\//iu.test(blogRaw) ? blogRaw : `https://${blogRaw}`) : null;
     const isLinkedInBlog = Boolean(blogUrl && /linkedin\.com\/in\//iu.test(blogUrl));
+    const profileUrl = isLinkedInBlog ? blogUrl! : (user.html_url || `https://github.com/${login}`);
+
+    const proofParts = [
+      `Verified public member of GitHub org @${orgLogin}${verifiedOrg.blog ? ` (${verifiedOrg.blog})` : ''}.`,
+      companyField ? `GitHub company field: ${companyField}.` : null,
+      bioField ? `Bio: ${bioField.slice(0, 120)}.` : null,
+      blogUrl && !isLinkedInBlog ? `Website: ${blogUrl}` : null,
+    ].filter(Boolean);
+    const evidenceText = proofParts.join(' ');
+
+    if (ollama?.enabled) {
+      const aiCheck = await verifyCurrentEmployeeWithAi({
+        ollama,
+        targetCompany: cleanName,
+        targetDomain: companyDomain,
+        jobTitle,
+        personName: realName || login,
+        personHeadline: `${roleTitle}${companyField ? ` | Company: ${companyField}` : ''}`,
+        profileUrl,
+        evidenceSnippet: evidenceText,
+        platform: 'github',
+      });
+      if (aiCheck && (!aiCheck.currentlyWorksAtTarget || !aiCheck.isRelevantContact)) {
+        continue;
+      }
+    }
 
     resolved.push({
       fullName: realName || login,
-      roleTitle: bioRole,
+      roleTitle,
       contactType: isManager ? 'hiring_manager' : 'engineer_referral',
       email,
-      profileUrl: isLinkedInBlog ? blogUrl : (user.html_url || `https://github.com/${login}`),
+      profileUrl,
       platform: email ? 'email' : isLinkedInBlog ? 'linkedin' : 'github',
       sourceUrl: `https://github.com/orgs/${orgLogin}/people`,
-      sourceNote: [
-        `Public engineer associated with @${orgLogin} on GitHub (${user.html_url || `https://github.com/${login}`}).`,
-        blogUrl && !isLinkedInBlog ? `Website: ${blogUrl}` : null,
-        user.twitter_username ? `X: https://x.com/${user.twitter_username}` : null,
-      ].filter(Boolean).join(' '),
-      confidence: email ? 'verified' : 'likely',
+      sourceNote: evidenceText,
+      confidence: email || Boolean(companyField) ? 'verified' : 'likely',
     });
+    if (resolved.length >= 2) break;
   }
   return resolved;
 }
 
 async function scanCompanySiteForRealEmails(companyName: string, siteUrl: string | null | undefined): Promise<DiscoveredContactCandidate[]> {
   if (!siteUrl) return [];
+  const domain = extractDomainHost(siteUrl);
+  if (!domain) return [];
+
   try {
-    const parsed = new URL(siteUrl);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return [];
-    if (/(?:greenhouse\.io|lever\.co|ashbyhq\.com|remotive\.com|remotefirstjobs\.com|arbeitnow\.com|jobicy\.com|ycombinator\.com|linkedin\.com|github\.com)$/iu.test(parsed.hostname)) {
-      return [];
-    }
-
+    const origin = new URL(/^https?:\/\//iu.test(siteUrl) ? siteUrl : `https://${siteUrl}`).origin;
     const foundEmails = new Set<string>();
-    const pagesToTry = [parsed.href, `${parsed.origin}/careers`, `${parsed.origin}/about`];
+    const pagesToTry = [origin, `${origin}/careers`, `${origin}/about`, `${origin}/team`, `${origin}/contact`];
 
-    for (const url of pagesToTry.slice(0, 2)) {
+    for (const url of pagesToTry) {
       try {
         const res = await fetch(url, {
-          headers: { 'User-Agent': 'CareerScout-Local/0.4' },
-          signal: AbortSignal.timeout(6000),
+          headers: { 'User-Agent': 'CareerScout-Local/0.7' },
+          signal: AbortSignal.timeout(5500),
         });
         if (!res.ok) continue;
-        const html = (await res.text()).slice(0, 120_000);
+        const html = (await res.text()).slice(0, 140_000);
         for (const email of extractPublicEmails(html)) {
-          if (/(?:career|job|recruit|talent|hr|hiring|people|founder|team|hello|contact)/iu.test(email)) {
+          const emailDomain = email.split('@')[1]?.toLowerCase() ?? '';
+          const sameDomain = emailDomain === domain || emailDomain.endsWith(`.${domain}`);
+          const relevantPrefix = /(?:career|job|recruit|talent|hr|hiring|people|founder|team|hello|contact|work|intern|engineering|cto|ceo)/iu.test(email);
+          if (sameDomain || relevantPrefix) {
             foundEmails.add(email);
           }
         }
@@ -195,15 +484,20 @@ async function scanCompanySiteForRealEmails(companyName: string, siteUrl: string
       }
     }
 
+    const cleanName = cleanCompanyNameForLookup(companyName);
     return [...foundEmails].slice(0, 2).map((email) => ({
-      fullName: `${companyName} Recruiting`,
-      roleTitle: /(?:career|job|recruit|talent|hr|hiring)/iu.test(email) ? 'Recruiting / Careers Inbox' : 'Company Team Contact',
-      contactType: /(?:career|job|recruit|talent|hr|hiring)/iu.test(email) ? 'recruiter' : 'talent_team',
+      fullName: /(?:founder|ceo|cto)/iu.test(email)
+        ? `${cleanName} Founders`
+        : /(?:career|job|recruit|talent|hr|hiring)/iu.test(email)
+          ? `${cleanName} Recruiting`
+          : `${cleanName} Team`,
+      roleTitle: /(?:career|job|recruit|talent|hr|hiring)/iu.test(email) ? 'Recruiting / Careers Inbox' : 'Official Company Inbox',
+      contactType: /(?:founder|ceo|cto)/iu.test(email) ? 'founder' : /(?:career|job|recruit|talent|hr|hiring)/iu.test(email) ? 'recruiter' : 'talent_team',
       email,
-      profileUrl: parsed.href,
+      profileUrl: origin,
       platform: 'email',
-      sourceUrl: parsed.href,
-      sourceNote: `Public email published on ${parsed.hostname}.`,
+      sourceUrl: origin,
+      sourceNote: `Verified public email scraped directly from official site ${domain}.`,
       confidence: 'verified',
     }));
   } catch {
@@ -214,42 +508,161 @@ async function scanCompanySiteForRealEmails(companyName: string, siteUrl: string
 async function discoverNamedPeopleViaFirecrawl(options: {
   apiKey: string;
   companyName: string;
+  companyDomain: string | null;
   roleTitle: string;
-}): Promise<{ contacts: DiscoveredContactCandidate[]; creditsUsed: number }> {
-  const query = `site:linkedin.com/in "${options.companyName}" ("Engineering Manager" OR "Technical Recruiter" OR "Talent Acquisition" OR "Software Engineer" OR "Frontend" OR "Full Stack")`;
+  ollama?: OllamaRuntimeOptions;
+}): Promise<{
+  contacts: DiscoveredContactCandidate[];
+  creditsUsed: number;
+  hitsReturned: number;
+  rejected: number;
+  error: string | null;
+}> {
+  const cleanCompany = cleanCompanyNameForLookup(options.companyName);
+  if (cleanCompany.length < 2) {
+    return { contacts: [], creditsUsed: 0, hitsReturned: 0, rejected: 0, error: null };
+  }
+
+  // Broad, realistic LinkedIn query (NO overly strict "at Company" quotes and NO "-former -alumni" exclusions)
+  const companyClause = options.companyDomain
+    ? `("${cleanCompany}" OR "${options.companyDomain}")`
+    : `"${cleanCompany}"`;
+  const query = `site:linkedin.com/in ${companyClause} ("Founder" OR "Co-Founder" OR "CTO" OR "Engineering Manager" OR "Tech Lead" OR "Recruiter" OR "Talent" OR "Software Engineer")`;
+
   const res = await firecrawlWebSearch({
     apiKey: options.apiKey,
     query,
-    limit: 5,
+    limit: 8,
   });
 
-  const contacts: DiscoveredContactCandidate[] = [];
-  for (const hit of res.hits) {
-    if (!/linkedin\.com\/in\/[^/?#]+/iu.test(hit.url)) continue;
-    const cleanUrl = hit.url.replace(/[?#].*$/u, '');
-    const cleanedTitle = hit.title.replace(/\s*\|\s*LinkedIn.*$/iu, '').trim();
-    const parts = cleanedTitle.split(/\s+-\s+|\s+–\s+|\s+\|\s+/u).map((p) => p.trim()).filter(Boolean);
-    const personName = parts[0];
-    const personRole = parts.slice(1).join(' · ') || `Team Member at ${options.companyName}`;
-    if (!personName || personName.length < 3 || personName.length > 60) continue;
+  if (!res.ok) {
+    return { contacts: [], creditsUsed: 1, hitsReturned: 0, rejected: 0, error: res.error };
+  }
 
-    const isRecruiter = /\b(?:recruiter|talent|hr|people)\b/iu.test(personRole);
-    const isManager = /\b(?:manager|lead|head|director|vp|cto|founder)\b/iu.test(personRole);
+  const contacts: DiscoveredContactCandidate[] = [];
+  let rejected = 0;
+
+  for (const hit of res.hits) {
+    const check = verifyLinkedinSearchHit(hit, cleanCompany, options.companyDomain);
+    if (!check.accepted) {
+      rejected += 1;
+      continue;
+    }
+
+    const cleanUrl = hit.url.replace(/[?#].*$/u, '');
+    let aiReasonNote = '';
+
+    if (options.ollama?.enabled) {
+      const aiCheck = await verifyCurrentEmployeeWithAi({
+        ollama: options.ollama,
+        targetCompany: cleanCompany,
+        targetDomain: options.companyDomain,
+        jobTitle: options.roleTitle,
+        personName: check.personName,
+        personHeadline: check.personRole,
+        profileUrl: cleanUrl,
+        evidenceSnippet: `${hit.title} | ${hit.description || hit.markdown || ''}`,
+        platform: 'linkedin',
+      });
+      if (aiCheck && (!aiCheck.currentlyWorksAtTarget || !aiCheck.isRelevantContact)) {
+        rejected += 1;
+        continue;
+      }
+      if (aiCheck?.reason) aiReasonNote = ` [AI verified: ${aiCheck.reason}]`;
+    }
 
     contacts.push({
-      fullName: personName,
-      roleTitle: personRole.slice(0, 130),
-      contactType: isRecruiter ? 'recruiter' : isManager ? 'hiring_manager' : 'engineer_referral',
+      fullName: check.personName,
+      roleTitle: check.personRole,
+      contactType: check.contactType,
       email: null,
       profileUrl: cleanUrl,
       platform: 'linkedin',
       sourceUrl: cleanUrl,
-      sourceNote: `Direct public LinkedIn profile found via Firecrawl v2 for ${options.companyName} (${options.roleTitle}).`,
+      sourceNote: `Matched via current-employee LinkedIn proof: "${check.evidenceSnippet}"${aiReasonNote}`,
       confidence: 'likely',
     });
+    if (contacts.length >= 2) break;
   }
 
-  return { contacts: contacts.slice(0, 3), creditsUsed: 1 };
+  return {
+    contacts,
+    creditsUsed: 1,
+    hitsReturned: res.hits.length,
+    rejected,
+    error: null,
+  };
+}
+
+async function discoverStartupFoundersOrEmailsViaFirecrawl(options: {
+  apiKey: string;
+  companyName: string;
+  companyDomain: string | null;
+}): Promise<{ contacts: DiscoveredContactCandidate[]; creditsUsed: number; error: string | null }> {
+  const cleanCompany = cleanCompanyNameForLookup(options.companyName);
+  if (cleanCompany.length < 2) return { contacts: [], creditsUsed: 0, error: null };
+
+  const query = options.companyDomain
+    ? `"@${options.companyDomain}" OR (site:linkedin.com/in "${cleanCompany}")`
+    : `"${cleanCompany}" (site:linkedin.com/in OR "careers@" OR "founders@" OR "hiring@" OR "hello@")`;
+
+  const res = await firecrawlWebSearch({
+    apiKey: options.apiKey,
+    query,
+    limit: 6,
+  });
+
+  if (!res.ok) return { contacts: [], creditsUsed: 1, error: res.error };
+
+  const contacts: DiscoveredContactCandidate[] = [];
+  for (const hit of res.hits) {
+    // 1. Check for LinkedIn profiles returned by the simpler fallback query
+    if (/linkedin\.com\/in\/[^/?#]+/iu.test(hit.url)) {
+      const check = verifyLinkedinSearchHit(hit, cleanCompany, options.companyDomain);
+      if (check.accepted) {
+        const cleanUrl = hit.url.replace(/[?#].*$/u, '');
+        contacts.push({
+          fullName: check.personName,
+          roleTitle: check.personRole,
+          contactType: check.contactType,
+          email: null,
+          profileUrl: cleanUrl,
+          platform: 'linkedin',
+          sourceUrl: cleanUrl,
+          sourceNote: `Found via fallback LinkedIn lookup: "${check.evidenceSnippet}"`,
+          confidence: 'likely',
+        });
+      }
+      continue;
+    }
+
+    // 2. Check for real company-domain emails in snippets
+    const snippet = `${hit.title} ${hit.description ?? ''} ${hit.markdown ?? ''}`;
+    for (const email of extractPublicEmails(snippet)) {
+      const emailDomain = email.split('@')[1]?.toLowerCase() ?? '';
+      const compactSlug = cleanCompany.toLowerCase().replace(/[^a-z0-9]/gu, '');
+      const matchesCompany =
+        (options.companyDomain && (emailDomain === options.companyDomain || emailDomain.endsWith(`.${options.companyDomain}`)))
+        || (compactSlug.length >= 4 && emailDomain.replace(/[^a-z0-9]/gu, '').includes(compactSlug));
+      if (!matchesCompany) continue;
+      if (contacts.some((c) => c.email?.toLowerCase() === email)) continue;
+
+      contacts.push({
+        fullName: `${cleanCompany} Contact`,
+        roleTitle: /(?:career|job|recruit|hiring|talent)/iu.test(email) ? 'Hiring / Recruiting Email' : 'Direct Company Email',
+        contactType: /(?:founder|ceo|cto)/iu.test(email) ? 'founder' : 'recruiter',
+        email,
+        profileUrl: hit.url,
+        platform: 'email',
+        sourceUrl: hit.url,
+        sourceNote: `Published company email found via web search at ${hit.url}.`,
+        confidence: 'verified',
+      });
+    }
+    if (contacts.length >= 2) break;
+  }
+
+  return { contacts: contacts.slice(0, 2), creditsUsed: 1, error: null };
 }
 
 export async function discoverCompanyContacts(
@@ -258,11 +671,28 @@ export async function discoverCompanyContacts(
     deepLookup: boolean;
     firecrawlApiKey?: string | null;
     githubToken?: string | null;
+    ollama?: OllamaRuntimeOptions;
   },
-): Promise<{ contacts: DiscoveredContactCandidate[]; firecrawlCreditsUsed: number }> {
+): Promise<{
+  contacts: DiscoveredContactCandidate[];
+  firecrawlCreditsUsed: number;
+  diagnostics: ContactDiscoveryDiagnostics;
+}> {
   const contacts: DiscoveredContactCandidate[] = [];
-  const company = job.companyName.trim();
+  const company = cleanCompanyNameForLookup(job.companyName) || job.companyName.trim();
+  let companyWebsite = job.companyWebsite ?? null;
+  let companyDomain = extractDomainHost(companyWebsite) ?? extractDomainHost(job.sourceUrl);
   let firecrawlCreditsUsed = 0;
+
+  const diagnostics: ContactDiscoveryDiagnostics = {
+    resolvedDomain: companyDomain,
+    linkedinHitsReturned: 0,
+    linkedinRejected: 0,
+    founderWebHits: 0,
+    siteEmailsFound: 0,
+    githubMembersFound: 0,
+    firecrawlError: null,
+  };
 
   // 1. Direct contact hint (e.g. HN Who is Hiring poster)
   if (job.rawContactHint?.email || job.rawContactHint?.name) {
@@ -292,17 +722,32 @@ export async function discoverCompanyContacts(
       profileUrl: job.sourceUrl,
       platform: 'email',
       sourceUrl: job.sourceUrl,
-      sourceNote: `Email address explicitly published in the job description at ${job.sourceUrl}.`,
+      sourceNote: `Email explicitly published inside the job description at ${job.sourceUrl}.`,
       confidence: 'verified',
     });
   }
 
-  // 3. Deep lookup: real GitHub org/repo engineers + public company website emails + Firecrawl v2 named LinkedIn people
+  // 3. Deep multi-stage real-people waterfall
   if (options.deepLookup) {
+    // 3a. If we don't know the company's real website domain yet (e.g., Wellfound/Internshala listing), resolve it first
+    if (!companyDomain && options.firecrawlApiKey?.trim()) {
+      const resolvedSite = await resolveCompanyOfficialWebsite(company, options.firecrawlApiKey.trim());
+      firecrawlCreditsUsed += resolvedSite.creditsUsed;
+      if (resolvedSite.error) diagnostics.firecrawlError = resolvedSite.error;
+      if (resolvedSite.domain) {
+        companyDomain = resolvedSite.domain;
+        companyWebsite = resolvedSite.websiteUrl;
+        diagnostics.resolvedDomain = companyDomain;
+      }
+    }
+
+    // 3b. Official company site email scraping + verified GitHub org public members
     const [ghPeople, siteEmails] = await Promise.all([
-      resolveGithubOrgPeople(company, options.githubToken ?? null),
-      scanCompanySiteForRealEmails(company, job.companyWebsite),
+      resolveGithubOrgPeople(company, companyDomain, options.githubToken ?? null, job.title, options.ollama),
+      scanCompanySiteForRealEmails(company, companyWebsite),
     ]);
+    diagnostics.githubMembersFound = ghPeople.length;
+    diagnostics.siteEmailsFound = siteEmails.length;
 
     for (const item of [...siteEmails, ...ghPeople]) {
       const dup = contacts.some(
@@ -313,27 +758,52 @@ export async function discoverCompanyContacts(
       if (!dup) contacts.push(item);
     }
 
-    if (options.firecrawlApiKey?.trim() && contacts.length < 2) {
+    // 3c. Firecrawl v2 LinkedIn current-employee lookup
+    if (options.firecrawlApiKey?.trim() && contacts.length < 2 && !diagnostics.firecrawlError) {
       const fc = await discoverNamedPeopleViaFirecrawl({
         apiKey: options.firecrawlApiKey.trim(),
         companyName: company,
+        companyDomain,
         roleTitle: job.title,
+        ollama: options.ollama,
       });
       firecrawlCreditsUsed += fc.creditsUsed;
+      diagnostics.linkedinHitsReturned = fc.hitsReturned;
+      diagnostics.linkedinRejected = fc.rejected;
+      if (fc.error) diagnostics.firecrawlError = fc.error;
+
       for (const person of fc.contacts) {
         if (!contacts.some((c) => c.profileUrl === person.profileUrl)) {
           contacts.push(person);
         }
       }
     }
+
+    // 3d. Fallback startup founder/email web lookup if STILL 0 contacts found
+    if (options.firecrawlApiKey?.trim() && contacts.length === 0 && !diagnostics.firecrawlError) {
+      const fb = await discoverStartupFoundersOrEmailsViaFirecrawl({
+        apiKey: options.firecrawlApiKey.trim(),
+        companyName: company,
+        companyDomain,
+      });
+      firecrawlCreditsUsed += fb.creditsUsed;
+      diagnostics.founderWebHits = fb.contacts.length;
+      if (fb.error) diagnostics.firecrawlError = fb.error;
+
+      for (const person of fb.contacts) {
+        if (!contacts.some((c) => (person.email && c.email === person.email) || (person.profileUrl && c.profileUrl === person.profileUrl))) {
+          contacts.push(person);
+        }
+      }
+    }
   }
 
-  return { contacts, firecrawlCreditsUsed };
+  return { contacts, firecrawlCreditsUsed, diagnostics };
 }
 
 function firstNameOf(fullName: string): string {
   const cleaned = fullName.replace(/\(.*?\)/gu, '').trim();
-  if (/hiring|team|recruiting|contact/iu.test(cleaned)) return cleaned;
+  if (/hiring|team|recruiting|contact|founders/iu.test(cleaned)) return cleaned;
   return cleaned.split(/\s+/u)[0] || cleaned;
 }
 
@@ -372,11 +842,13 @@ export async function generateGroundedDraftProposals(
   matchedSkills: string[],
   contacts: DiscoveredContactCandidate[],
   profile: UserProfileContext,
-  ollama: { enabled: boolean; baseUrl: string; model: string | null },
+  ollama: OllamaRuntimeOptions,
   matchScore = 70,
+  options: { skipFallbackIfNoContacts?: boolean } = {},
 ): Promise<GeneratedDraftProposal[]> {
-  const company = job.companyName.trim();
+  const company = cleanCompanyNameForLookup(job.companyName) || job.companyName.trim();
   const role = job.title.trim();
+  const cleanJobUrl = await resolveRedirectUrl(job.sourceUrl);
   const { topSkills, topProjects, primaryEducation, groundingFacts } = selectProfileHighlights(profile, matchedSkills);
 
   const eduSentence = primaryEducation
@@ -395,11 +867,11 @@ export async function generateGroundedDraftProposals(
 
   const proposals: GeneratedDraftProposal[] = [];
 
-  // 1. Focused personalized drafts for up to 2 REAL discovered contacts
   const prioritized = contacts
     .map((c, index) => ({ contact: c, index }))
     .sort((a, b) => {
-      const rank = (c: DiscoveredContactCandidate) => (c.email ? 3 : c.platform === 'linkedin' ? 2 : 1);
+      const rank = (c: DiscoveredContactCandidate) =>
+        c.email ? 4 : c.contactType === 'founder' || c.contactType === 'hiring_manager' ? 3 : c.platform === 'linkedin' ? 2 : 1;
       return rank(b.contact) - rank(a.contact);
     })
     .slice(0, 2);
@@ -407,16 +879,20 @@ export async function generateGroundedDraftProposals(
   for (const { contact, index } of prioritized) {
     const greetingName = firstNameOf(contact.fullName);
     const isReferral = contact.contactType === 'engineer_referral';
+    const safeRolePhrase =
+      contact.roleTitle && /[a-zA-Z]{4,}/u.test(contact.roleTitle) && !/github member/iu.test(contact.roleTitle)
+        ? ` (${contact.roleTitle})`
+        : '';
 
     const rawBody = isReferral
       ? [
           `Hi ${greetingName},`,
           '',
-          `I came across your profile${contact.roleTitle ? ` (${contact.roleTitle})` : ''} while researching the ${role} opening at ${company}.`,
+          `I came across your profile${safeRolePhrase} while researching the ${role} opening at ${company}.`,
           '',
           `${eduSentence}${topSkills.length ? `, working with ${topSkills.slice(0, 5).join(', ')}` : ''}. ${projectSentence}`.trim(),
           '',
-          `If my background looks like a fit for the team, would you be open to sharing a quick referral or pointing me toward the hiring manager for the ${role} role?`,
+          `If my background looks like a fit for the team at ${company}, would you be open to sharing a quick referral or pointing me toward the hiring manager for the ${role} role?`,
           linksLine ? `\n${linksLine}` : '',
           '',
           `Thanks for your time,`,
@@ -425,11 +901,11 @@ export async function generateGroundedDraftProposals(
       : [
           `Hi ${greetingName},`,
           '',
-          `I saw the ${role} opening at ${company} (${job.sourceUrl}) and wanted to reach out directly.`,
+          `I saw the ${role} opening at ${company} (${cleanJobUrl}) and wanted to reach out directly.`,
           '',
           `${eduSentence}${topSkills.length ? `, building projects with ${topSkills.slice(0, 5).join(', ')}` : ''}. ${projectSentence}`.trim(),
           '',
-          `I would love to be considered for the ${role} position and am happy to share my resume or walk through my code.`,
+          `I would love to be considered for the ${role} position at ${company} and am happy to share my resume or walk through my code.`,
           linksLine ? `\n${linksLine}` : '',
           '',
           `Best regards,`,
@@ -441,27 +917,56 @@ export async function generateGroundedDraftProposals(
       const polished = await ollamaChatText({
         baseUrl: ollama.baseUrl,
         model: ollama.model,
-        system: 'You are a concise career writing assistant. Rewrite outreach messages to sound natural, direct, and under 135 words. NEVER invent any skill, metric, employer, degree, or link not listed in the verified facts.',
-        user: `Verified facts:\n${groundingFacts.join('\n')}\n\nRecipient: ${contact.fullName} (${contact.roleTitle ?? company})\nRole: ${role} at ${company}\n\nDraft:\n${rawBody}`,
+        timeoutMs: 90_000,
+        numPredict: 320,
+        temperature: 0.2,
+        system: [
+          'You rewrite short internship outreach messages for a real computer science student.',
+          'FOLLOW EVERY RULE STRICTLY:',
+          `1. Write ONLY about the "${role}" role at "${company}". NEVER mention any other company.`,
+          `2. Address the message to "${greetingName}".`,
+          '3. Keep it between 70 and 130 words.',
+          '4. Use ONLY the verified skills, projects, education, and links given below. NEVER invent facts, metrics, or links.',
+          '5. Do NOT use em dashes (—) or clichés ("thrilled", "keen interest", "eager to leverage", "invaluable asset").',
+          '6. Return ONLY the ready-to-send message text with greeting and sign-off. No intro or notes.',
+        ].join('\n'),
+        user: [
+          `TARGET COMPANY: ${company}`,
+          `TARGET ROLE: ${role}`,
+          `RECIPIENT: ${contact.fullName} (${contact.roleTitle ?? company})`,
+          `GOAL: ${isReferral ? 'Politely ask for a referral or hiring manager pointer' : 'Express direct interest in applying'}`,
+          `VERIFIED CANDIDATE FACTS:\n${groundingFacts.join('\n')}`,
+          `SIGN-OFF NAME: ${profile.displayName}`,
+          '',
+          `STARTING DRAFT TO IMPROVE:\n${rawBody}`,
+        ].join('\n'),
       });
-      if (polished) finalBody = polished;
+      if (polished) {
+        const cleaned = polished.replace(/\s*[—–]\s*/gu, ', ').trim();
+        const words = cleaned.split(/\s+/u).filter(Boolean).length;
+        const mentionsCompany = cleaned.toLowerCase().includes(company.toLowerCase());
+        if (mentionsCompany && words >= 45 && words <= 185) {
+          finalBody = cleaned;
+        }
+      }
     }
 
     proposals.push({
       channel: contact.email ? 'email' : isReferral ? 'referral_request' : 'linkedin_dm',
-      recipientLabel: `${contact.fullName}${contact.roleTitle ? ` — ${contact.roleTitle}` : ''}`,
+      recipientLabel: `${contact.fullName}${contact.roleTitle ? ` - ${contact.roleTitle}` : ''}`,
       recipientTarget: contact.email ?? contact.profileUrl ?? null,
       subject: isReferral
-        ? `Referral inquiry: ${role} at ${company} — ${profile.displayName}`
-        : `Application: ${role} — ${profile.displayName}`,
+        ? `Referral inquiry: ${role} at ${company} - ${profile.displayName}`
+        : `Application: ${role} - ${profile.displayName}`,
       body: finalBody,
       groundingFacts,
       contactIndex: index,
     });
   }
 
-  // 2. If NO real contact was found yet, create 1 clear Application Pitch / Cover Letter (explicitly linked to the job posting, never pretending to be a person's profile)
-  if (proposals.length === 0 && matchScore >= 55) {
+  // Only create a cover_letter pitch when no real contact was found AND caller hasn't disabled fallback.
+  // NEVER paste the job URL or a Google redirect link into recipientTarget—keep recipientTarget cleanly null!
+  if (proposals.length === 0 && !options.skipFallbackIfNoContacts && matchScore >= 55) {
     const pitchBody = [
       `Hi ${company} Hiring Team,`,
       '',
@@ -476,9 +981,9 @@ export async function generateGroundedDraftProposals(
 
     proposals.push({
       channel: 'cover_letter',
-      recipientLabel: `${company} Application Pitch (no verified person found yet)`,
-      recipientTarget: job.applyUrl ?? job.sourceUrl,
-      subject: `Application: ${role} — ${profile.displayName}`,
+      recipientLabel: `${company} Hiring Team (no verified person found yet)`,
+      recipientTarget: null,
+      subject: `Application: ${role} - ${profile.displayName}`,
       body: pitchBody,
       groundingFacts,
       contactIndex: null,
@@ -486,93 +991,4 @@ export async function generateGroundedDraftProposals(
   }
 
   return proposals;
-}
-
-export async function buildTailoredApplicationPack(
-  job: { title: string; companyName: string; description: string | null; sourceUrl: string },
-  matchedSkills: string[],
-  profile: UserProfileContext,
-  ollama: { enabled: boolean; baseUrl: string; model: string | null },
-): Promise<TailoredApplicationPack> {
-  const { topSkills, topProjects, primaryEducation, groundingFacts } = selectProfileHighlights(profile, matchedSkills);
-
-  const tailoredHeadline = `${profile.currentTitle || 'Software Developer'} · ${topSkills.slice(0, 4).join(' · ') || 'Full-Stack Web Development'}`;
-  const baseSummary = [
-    primaryEducation
-      ? `${[primaryEducation.degree, primaryEducation.fieldOfStudy].filter(Boolean).join(' in ')} student at ${primaryEducation.institution}`
-      : `${profile.currentTitle || 'Software developer'}`,
-    topSkills.length ? `focused on ${topSkills.join(', ')}` : 'focused on full-stack web engineering',
-    `tailored for ${job.title} at ${job.companyName}.`,
-    topProjects.length ? `Shipped ${topProjects.map((p) => p.name).join(' and ')}.` : '',
-  ].filter(Boolean).join(' ');
-
-  const baseCoverLetter = [
-    `Dear ${job.companyName} Hiring Team,`,
-    '',
-    `I am writing to express my strong interest in the ${job.title} role at ${job.companyName}. ${baseSummary}`,
-    '',
-    ...topProjects.map(
-      (p) => `- ${p.name}${p.tagline ? ` — ${p.tagline}` : ''}: ${p.description?.slice(0, 260) || `Built with ${p.technologies.join(', ')}.`}${p.projectUrl ? ` (${p.projectUrl})` : p.repositoryUrl ? ` (${p.repositoryUrl})` : ''}`,
-    ),
-    '',
-    `Thank you for your time and consideration. I would welcome the opportunity to discuss how I can contribute to ${job.companyName}.`,
-    '',
-    `Sincerely,`,
-    profile.displayName,
-    [profile.email, profile.portfolioUrl, profile.githubUrl, profile.linkedinUrl].filter(Boolean).join(' | '),
-  ].join('\n');
-
-  let finalCoverLetter = baseCoverLetter;
-  let generatedWithAi = false;
-  if (ollama.enabled) {
-    const polished = await ollamaChatText({
-      baseUrl: ollama.baseUrl,
-      model: ollama.model,
-      system: 'Write a crisp, factual cover letter under 220 words tailored to the target role. ONLY use verified facts provided by the user—never fabricate employers, skills, or numbers.',
-      user: `Target role: ${job.title} at ${job.companyName}\nVerified facts:\n${groundingFacts.join('\n')}\n\nBase letter:\n${baseCoverLetter}`,
-      timeoutMs: 30_000,
-    });
-    if (polished) {
-      finalCoverLetter = polished;
-      generatedWithAi = true;
-    }
-  }
-
-  const highlightedProjects = topProjects.map((p) => ({
-    name: p.name,
-    pitch: p.description?.slice(0, 260) || p.tagline || `Built with ${p.technologies.join(', ')}`,
-    url: p.projectUrl || p.repositoryUrl || null,
-  }));
-
-  const markdownExport = [
-    `# Tailored Application Pack — ${job.title} at ${job.companyName}`,
-    `Source: ${job.sourceUrl}`,
-    '',
-    `## Tailored Resume Headline`,
-    tailoredHeadline,
-    '',
-    `## Tailored Summary`,
-    baseSummary,
-    '',
-    `## Verified Skills to Emphasize`,
-    topSkills.join(', ') || 'See profile',
-    '',
-    `## Highlighted Projects`,
-    ...highlightedProjects.map((p) => `- **${p.name}**: ${p.pitch}${p.url ? ` (${p.url})` : ''}`),
-    '',
-    `## Cover Letter`,
-    finalCoverLetter,
-  ].join('\n');
-
-  return {
-    jobTitle: job.title,
-    companyName: job.companyName,
-    tailoredHeadline,
-    tailoredSummary: baseSummary,
-    matchedSkills: topSkills,
-    highlightedProjects,
-    coverLetter: finalCoverLetter,
-    markdownExport,
-    generatedWithAi,
-  };
 }

@@ -18,6 +18,7 @@ import {
   userSkills,
   users,
 } from '@career-scout/database';
+import { verifyInternationalEligibilityWithAi } from '../ai/verifiers.js';
 import { getUserRuntimeConfig } from '../config/user-runtime-config.js';
 import {
   CURATED_ATS_BOARDS,
@@ -31,13 +32,18 @@ import {
   fetchRemoteFirstJobs,
   fetchRemotiveJobs,
   fetchSimplifyInternships,
+  unwrapRedirectUrlSync,
 } from './connectors.js';
 import {
   evaluateJobAgainstProfile,
   normalizeCompanyName,
   userStrictlyTargetsInternships,
 } from './matcher.js';
-import { discoverCompanyContacts, generateGroundedDraftProposals } from './people-and-drafts.js';
+import {
+  discoverCompanyContacts,
+  generateGroundedDraftProposals,
+  type ContactDiscoveryDiagnostics,
+} from './people-and-drafts.js';
 import type { DiscoveryRunConfig, RawDiscoveredJob, RunLogEntry, UserProfileContext } from './types.js';
 
 interface ActiveRunControl {
@@ -163,17 +169,17 @@ export function loadUserProfileContext(db: AppDatabase, userId: string): UserPro
 function upsertCompany(db: AppDatabase, userId: string, job: RawDiscoveredJob): string {
   const normalized = normalizeCompanyName(job.companyName) || job.companyName.trim().toLowerCase();
   const existing = db
-    .select({ id: companies.id })
+    .select({ id: companies.id, websiteUrl: companies.websiteUrl })
     .from(companies)
     .where(and(eq(companies.userId, userId), eq(companies.normalizedName, normalized)))
     .get();
 
   if (existing) {
-    if (job.careersUrl || job.companyWebsite) {
+    if (job.careersUrl || (job.companyWebsite && !existing.websiteUrl)) {
       db.update(companies)
         .set({
           ...(job.careersUrl ? { careersUrl: job.careersUrl } : {}),
-          ...(job.companyWebsite ? { websiteUrl: job.companyWebsite } : {}),
+          ...(job.companyWebsite && !existing.websiteUrl ? { websiteUrl: job.companyWebsite } : {}),
           updatedAt: new Date(),
         })
         .where(eq(companies.id, existing.id))
@@ -221,8 +227,15 @@ export async function persistJobWithContactsAndDrafts(
   draftsAdded: number;
   firecrawlCreditsUsed: number;
   rejectionReason: string | null;
+  diagnostics: ContactDiscoveryDiagnostics | null;
 }> {
-  const evaluated = evaluateJobAgainstProfile(rawJob, profile);
+  const cleanJob: RawDiscoveredJob = {
+    ...rawJob,
+    sourceUrl: unwrapRedirectUrlSync(rawJob.sourceUrl),
+    applyUrl: unwrapRedirectUrlSync(rawJob.applyUrl ?? rawJob.sourceUrl),
+  };
+
+  const evaluated = evaluateJobAgainstProfile(cleanJob, profile);
   if (!evaluated.accepted && !options.forceAccept) {
     return {
       accepted: false,
@@ -232,6 +245,7 @@ export async function persistJobWithContactsAndDrafts(
       draftsAdded: 0,
       firecrawlCreditsUsed: 0,
       rejectionReason: evaluated.rejectionReason,
+      diagnostics: null,
     };
   }
 
@@ -254,10 +268,20 @@ export async function persistJobWithContactsAndDrafts(
       draftsAdded: 0,
       firecrawlCreditsUsed: 0,
       rejectionReason: null,
+      diagnostics: null,
     };
   }
 
-  const companyId = upsertCompany(db, profile.userId, rawJob);
+  const companyId = upsertCompany(db, profile.userId, cleanJob);
+  const companyRow = db
+    .select({ websiteUrl: companies.websiteUrl })
+    .from(companies)
+    .where(eq(companies.id, companyId))
+    .get();
+  if (!cleanJob.companyWebsite && companyRow?.websiteUrl) {
+    cleanJob.companyWebsite = companyRow.websiteUrl;
+  }
+
   const jobId = randomUUID();
   const score = evaluated.accepted ? evaluated.matchScore : Math.max(65, evaluated.matchScore);
   const reasons = evaluated.matchReasons.length > 0
@@ -270,18 +294,18 @@ export async function persistJobWithContactsAndDrafts(
       userId: profile.userId,
       companyId,
       fingerprint: evaluated.fingerprint,
-      title: rawJob.title.trim().slice(0, 180),
-      companyName: rawJob.companyName.trim().slice(0, 140),
-      sourceName: rawJob.sourceName,
-      sourceUrl: rawJob.sourceUrl,
-      applyUrl: rawJob.applyUrl ?? rawJob.sourceUrl,
-      locationText: rawJob.locationText?.trim().slice(0, 140) ?? null,
+      title: cleanJob.title.trim().slice(0, 180),
+      companyName: cleanJob.companyName.trim().slice(0, 140),
+      sourceName: cleanJob.sourceName,
+      sourceUrl: cleanJob.sourceUrl,
+      applyUrl: cleanJob.applyUrl ?? cleanJob.sourceUrl,
+      locationText: cleanJob.locationText?.trim().slice(0, 140) ?? null,
       countryScope: evaluated.countryScope,
       workArrangement: evaluated.workArrangement,
       employmentType: evaluated.employmentType,
       compensationStatus: evaluated.compensationStatus,
-      salaryText: rawJob.salaryText?.trim().slice(0, 100) ?? null,
-      description: rawJob.description?.slice(0, 5000) ?? null,
+      salaryText: cleanJob.salaryText?.trim().slice(0, 100) ?? null,
+      description: cleanJob.description?.slice(0, 5000) ?? null,
       matchedRoleTitle: evaluated.matchedRoleTitle ?? profile.preferredRoles[0]?.title ?? null,
       matchScore: score,
       matchReasonsJson: JSON.stringify(reasons),
@@ -289,7 +313,7 @@ export async function persistJobWithContactsAndDrafts(
       missingSkillsJson: JSON.stringify(evaluated.missingSkills),
       verificationStatus: evaluated.verificationStatus,
       applicationStatus: options.forceAccept ? 'saved' : 'none',
-      postedAt: rawJob.postedAt ?? null,
+      postedAt: cleanJob.postedAt ?? null,
       discoveredAt: new Date(),
       updatedAt: new Date(),
     })
@@ -298,14 +322,30 @@ export async function persistJobWithContactsAndDrafts(
   let contactsAdded = 0;
   let draftsAdded = 0;
   let firecrawlCreditsUsed = 0;
+  let diagnostics: ContactDiscoveryDiagnostics | null = null;
 
   if (options.generateDrafts) {
-    const discovery = await discoverCompanyContacts(rawJob, {
+    const ollamaOpts = {
+      enabled: options.useLocalOllama,
+      baseUrl: options.ollamaBaseUrl || 'http://127.0.0.1:11434',
+      model: options.ollamaModel ?? null,
+    };
+
+    const discovery = await discoverCompanyContacts(cleanJob, {
       deepLookup: options.allowExternalContactLookup,
       firecrawlApiKey: options.firecrawlApiKey ?? null,
       githubToken: options.githubToken ?? null,
+      ollama: ollamaOpts,
     });
     firecrawlCreditsUsed = discovery.firecrawlCreditsUsed;
+    diagnostics = discovery.diagnostics;
+
+    if (discovery.diagnostics.resolvedDomain && !companyRow?.websiteUrl) {
+      db.update(companies)
+        .set({ websiteUrl: `https://${discovery.diagnostics.resolvedDomain}`, updatedAt: new Date() })
+        .where(eq(companies.id, companyId))
+        .run();
+    }
 
     const contactIds: string[] = [];
     for (const contact of discovery.contacts) {
@@ -316,7 +356,7 @@ export async function persistJobWithContactsAndDrafts(
           userId: profile.userId,
           companyId,
           jobId,
-          companyName: rawJob.companyName.trim().slice(0, 140),
+          companyName: cleanJob.companyName.trim().slice(0, 140),
           fullName: contact.fullName.slice(0, 120),
           roleTitle: contact.roleTitle?.slice(0, 140) ?? null,
           contactType: contact.contactType,
@@ -334,15 +374,11 @@ export async function persistJobWithContactsAndDrafts(
     }
 
     const proposals = await generateGroundedDraftProposals(
-      rawJob,
+      cleanJob,
       evaluated.matchedSkills,
       discovery.contacts,
       profile,
-      {
-        enabled: options.useLocalOllama,
-        baseUrl: options.ollamaBaseUrl || 'http://127.0.0.1:11434',
-        model: options.ollamaModel ?? null,
-      },
+      ollamaOpts,
       score,
     );
 
@@ -357,8 +393,8 @@ export async function persistJobWithContactsAndDrafts(
           userId: profile.userId,
           jobId,
           contactId: linkedContactId,
-          companyName: rawJob.companyName.trim().slice(0, 140),
-          roleTitle: rawJob.title.trim().slice(0, 180),
+          companyName: cleanJob.companyName.trim().slice(0, 140),
+          roleTitle: cleanJob.title.trim().slice(0, 180),
           channel: proposal.channel,
           recipientLabel: proposal.recipientLabel.slice(0, 160),
           recipientTarget: proposal.recipientTarget?.slice(0, 500) ?? null,
@@ -380,6 +416,7 @@ export async function persistJobWithContactsAndDrafts(
     draftsAdded,
     firecrawlCreditsUsed,
     rejectionReason: null,
+    diagnostics,
   };
 }
 
@@ -407,8 +444,8 @@ export function startDiscoveryRun(
       level: 'info',
       message:
         config.mode === 'overnight'
-          ? `Started Overnight Deep Researcher (all ATS boards + Firecrawl v2 + GitHub real-people discovery, cap: ${config.maxJobsToSave} matches).`
-          : `Started Quick Scan (fast internship feeds + top ATS boards + real people lookup, cap: ${config.maxJobsToSave} matches).`,
+          ? `Started Overnight Deep Researcher (50+ India/Global ATS boards + Firecrawl v2 + Real-People Waterfall & Backfill, cap: ${config.maxJobsToSave} matches).`
+          : `Started Quick Scan (fast internship feeds + top 16 India/Global ATS boards + real-people lookup, cap: ${config.maxJobsToSave} matches).`,
     },
   ];
 
@@ -446,11 +483,12 @@ async function executeDiscoveryLoop(
   let draftsCreated = 0;
   let deepCompanyLookups = 0;
   let firecrawlCreditsLeft = Math.max(0, config.firecrawlCreditBudget);
+  let firecrawlHaltedReason: string | null = null;
   const deadline = Date.now() + Math.max(1, config.maxDurationMinutes) * 60_000;
 
   const pushLog = (level: RunLogEntry['level'], message: string, checkpoint?: Record<string, unknown>) => {
     logs.push({ at: new Date().toISOString(), level, message });
-    if (logs.length > 100) logs.splice(0, logs.length - 100);
+    if (logs.length > 120) logs.splice(0, logs.length - 120);
     db.update(researchRuns)
       .set({
         jobsScanned,
@@ -472,15 +510,27 @@ async function executeDiscoveryLoop(
     const runtimeConfig = getUserRuntimeConfig(userId);
     const internOnly = userStrictlyTargetsInternships(profile);
     const searchTerms = profile.preferredRoles.map((r) => r.title).filter(Boolean);
-    const homeCountry = profile.locationCountry || profile.preferredLocations[0]?.country || null;
+    const homeCountry = profile.locationCountry || profile.preferredLocations[0]?.country || 'India';
+    const ollamaOpts = {
+      enabled: config.useLocalOllama,
+      baseUrl: runtimeConfig.ollamaBaseUrl,
+      model: runtimeConfig.ollamaModel,
+    };
+
+    // Reserve ~60% of Firecrawl credits specifically for finding real people & company domains
+    const fcJobBudget = runtimeConfig.firecrawlApiKey && firecrawlCreditsLeft > 0
+      ? config.mode === 'overnight'
+        ? Math.max(1, Math.min(10, Math.floor(firecrawlCreditsLeft * 0.4)))
+        : Math.max(1, Math.min(3, Math.floor(firecrawlCreditsLeft * 0.4)))
+      : 0;
 
     pushLog(
       'info',
-      `Loaded ${profile.preferredRoles.length} target roles (${internOnly ? 'STRICT INTERNSHIP-ONLY' : 'mixed seniority'}) · Firecrawl: ${runtimeConfig.firecrawlApiKey ? `enabled (${firecrawlCreditsLeft} credit cap)` : 'not configured'} · Ollama: ${config.useLocalOllama ? runtimeConfig.ollamaModel || 'auto-detect' : 'off'}.`,
+      `Loaded ${profile.preferredRoles.length} target roles (${internOnly ? 'STRICT INTERNSHIP-ONLY' : 'mixed seniority'}) · Firecrawl: ${runtimeConfig.firecrawlApiKey ? `enabled (${firecrawlCreditsLeft} total credits: up to ${fcJobBudget} for jobs, rest reserved for real people)` : 'not configured'} · Ollama: ${config.useLocalOllama ? runtimeConfig.ollamaModel || 'auto-detect' : 'off'}.`,
     );
 
     const allBoards = [...(config.customBoards ?? []), ...CURATED_ATS_BOARDS];
-    const selectedBoards = config.mode === 'quick' ? allBoards.slice(0, 12) : allBoards;
+    const selectedBoards = config.mode === 'quick' ? allBoards.slice(0, 16) : allBoards;
 
     const sourceTasks: Array<{ label: string; maxPerSource: number; run: () => Promise<RawDiscoveredJob[]> }> = [
       { label: 'RemoteFirstJobs API', maxPerSource: 20, run: () => fetchRemoteFirstJobs(internOnly) },
@@ -488,13 +538,10 @@ async function executeDiscoveryLoop(
       { label: 'Hacker News Who Is Hiring', maxPerSource: 20, run: () => fetchHackerNewsHiringJobs() },
     ];
 
-    if (runtimeConfig.firecrawlApiKey && firecrawlCreditsLeft > 0) {
-      const fcJobBudget = config.mode === 'overnight'
-        ? Math.max(1, Math.min(4, Math.floor(firecrawlCreditsLeft / 2)))
-        : Math.min(2, firecrawlCreditsLeft);
+    if (runtimeConfig.firecrawlApiKey && fcJobBudget > 0) {
       sourceTasks.push({
-        label: 'Firecrawl v2 Targeted ATS & Internships Search',
-        maxPerSource: 20,
+        label: 'Firecrawl v2 Targeted ATS & Startup Internships',
+        maxPerSource: 30,
         run: async () => {
           const res = await fetchFirecrawlDiscoveryJobs({
             apiKey: runtimeConfig.firecrawlApiKey!,
@@ -506,6 +553,10 @@ async function executeDiscoveryLoop(
             creditBudget: fcJobBudget,
           });
           firecrawlCreditsLeft = Math.max(0, firecrawlCreditsLeft - res.creditsUsed);
+          if (res.error) {
+            firecrawlHaltedReason = res.error;
+            pushLog('warn', `Firecrawl job search stopped: ${res.error}`);
+          }
           return res.jobs;
         },
       });
@@ -561,12 +612,42 @@ async function executeDiscoveryLoop(
         if (!config.includeNational && preview.countryScope === 'national') continue;
         if (!config.includeInternational && preview.countryScope === 'international') continue;
 
+        const alreadySaved = db
+          .select({ id: jobOpportunities.id })
+          .from(jobOpportunities)
+          .where(and(eq(jobOpportunities.userId, userId), eq(jobOpportunities.fingerprint, preview.fingerprint)))
+          .get();
+        if (alreadySaved) continue;
+
+        if (
+          config.mode === 'overnight'
+          && ollamaOpts.enabled
+          && preview.countryScope !== 'national'
+          && (rawJob.description?.length ?? 0) >= 80
+        ) {
+          const aiIntl = await verifyInternationalEligibilityWithAi({
+            ollama: ollamaOpts,
+            jobTitle: rawJob.title,
+            companyName: rawJob.companyName,
+            locationText: rawJob.locationText ?? '',
+            sponsorshipNote: rawJob.sponsorshipNote ?? null,
+            description: rawJob.description ?? '',
+            homeCountry,
+          });
+          if (aiIntl && !aiIntl.eligibleFromIndia) {
+            pushLog('info', `AI skipped international job "${rawJob.title}" at ${rawJob.companyName}: ${aiIntl.reason}`);
+            continue;
+          }
+        }
+
         const compKey = normalizeCompanyName(rawJob.companyName);
         const isDeepOvernight = config.mode === 'overnight';
-        const maxDeepLookups = isDeepOvernight ? 40 : 10;
+        const maxDeepLookups = isDeepOvernight ? 45 : 10;
         const allowDeepPeople = !researchedCompanies.has(compKey) && deepCompanyLookups < maxDeepLookups;
         const firecrawlKeyForPeople =
-          allowDeepPeople && firecrawlCreditsLeft > 0 ? runtimeConfig.firecrawlApiKey : null;
+          allowDeepPeople && !firecrawlHaltedReason && firecrawlCreditsLeft > 0
+            ? runtimeConfig.firecrawlApiKey
+            : null;
 
         const result = await persistJobWithContactsAndDrafts(db, profile, rawJob, {
           forceAccept: false,
@@ -581,6 +662,10 @@ async function executeDiscoveryLoop(
 
         if (result.firecrawlCreditsUsed > 0) {
           firecrawlCreditsLeft = Math.max(0, firecrawlCreditsLeft - result.firecrawlCreditsUsed);
+        }
+        if (result.diagnostics?.firecrawlError && !firecrawlHaltedReason) {
+          firecrawlHaltedReason = result.diagnostics.firecrawlError;
+          pushLog('warn', `Firecrawl people lookup paused: ${firecrawlHaltedReason}`);
         }
 
         if (result.accepted && result.isNew) {
@@ -597,12 +682,167 @@ async function executeDiscoveryLoop(
 
       pushLog(
         'info',
-        `${task.label}: ${rawJobs.length} scanned -> ${sourceNewMatches} new strict matches (${contactsFound} real contacts total).`,
+        `${task.label}: ${rawJobs.length} scanned -> ${sourceNewMatches} new strict matches (${contactsFound} verified current contacts, ${firecrawlCreditsLeft} Firecrawl credits left).`,
         { source: task.label, jobsScanned, jobsMatched, contactsFound, draftsCreated, firecrawlCreditsLeft },
       );
 
       if (config.mode === 'overnight' && !control.cancelled) {
-        await sleepCancelable(2000, control);
+        await sleepCancelable(1500, control);
+      }
+    }
+
+    // Overnight People-Backfill Pass: revisit saved jobs that still have 0 verified contacts
+    if (
+      config.mode === 'overnight'
+      && config.generateDrafts
+      && !control.cancelled
+      && Date.now() < deadline
+    ) {
+      const savedJobs = db
+        .select()
+        .from(jobOpportunities)
+        .where(eq(jobOpportunities.userId, userId))
+        .orderBy(desc(jobOpportunities.matchScore))
+        .all();
+      const existingContactRows = db
+        .select({ jobId: companyContacts.jobId })
+        .from(companyContacts)
+        .where(eq(companyContacts.userId, userId))
+        .all();
+      const jobsWithContacts = new Set(existingContactRows.map((c) => c.jobId).filter(Boolean));
+      const jobsNeedingPeople = savedJobs.filter((j) => !jobsWithContacts.has(j.id));
+
+      if (jobsNeedingPeople.length > 0) {
+        pushLog('info', `Starting People-Backfill Pass for ${jobsNeedingPeople.length} matched job(s) that still lack verified contacts…`, {
+          stage: 'people_backfill',
+        });
+
+        const backfilledCompanies = new Set<string>();
+        for (const job of jobsNeedingPeople) {
+          if (control.cancelled || Date.now() >= deadline || backfilledCompanies.size >= 25) break;
+          const compKey = normalizeCompanyName(job.companyName);
+          if (backfilledCompanies.has(compKey)) continue;
+          backfilledCompanies.add(compKey);
+
+          const compRow = job.companyId
+            ? db.select({ websiteUrl: companies.websiteUrl }).from(companies).where(eq(companies.id, job.companyId)).get()
+            : null;
+
+          const rawJob: RawDiscoveredJob = {
+            sourceName: job.sourceName,
+            sourceUrl: job.sourceUrl,
+            applyUrl: job.applyUrl,
+            title: job.title,
+            companyName: job.companyName,
+            companyWebsite: compRow?.websiteUrl ?? null,
+            locationText: job.locationText,
+            salaryText: job.salaryText,
+            description: job.description,
+            postedAt: job.postedAt,
+          };
+
+          const discovery = await discoverCompanyContacts(rawJob, {
+            deepLookup: true,
+            firecrawlApiKey: !firecrawlHaltedReason && firecrawlCreditsLeft > 0 ? runtimeConfig.firecrawlApiKey : null,
+            githubToken: runtimeConfig.githubToken,
+            ollama: ollamaOpts,
+          });
+
+          if (discovery.firecrawlCreditsUsed > 0) {
+            firecrawlCreditsLeft = Math.max(0, firecrawlCreditsLeft - discovery.firecrawlCreditsUsed);
+          }
+          if (discovery.diagnostics.firecrawlError && !firecrawlHaltedReason) {
+            firecrawlHaltedReason = discovery.diagnostics.firecrawlError;
+            pushLog('warn', `Firecrawl backfill paused: ${firecrawlHaltedReason}`);
+          }
+          if (discovery.diagnostics.resolvedDomain && job.companyId && !compRow?.websiteUrl) {
+            db.update(companies)
+              .set({ websiteUrl: `https://${discovery.diagnostics.resolvedDomain}`, updatedAt: new Date() })
+              .where(eq(companies.id, job.companyId))
+              .run();
+          }
+
+          if (discovery.contacts.length > 0) {
+            const contactIds: string[] = [];
+            for (const contact of discovery.contacts) {
+              const cid = randomUUID();
+              db.insert(companyContacts)
+                .values({
+                  id: cid,
+                  userId,
+                  companyId: job.companyId,
+                  jobId: job.id,
+                  companyName: job.companyName,
+                  fullName: contact.fullName.slice(0, 120),
+                  roleTitle: contact.roleTitle?.slice(0, 140) ?? null,
+                  contactType: contact.contactType,
+                  email: contact.email,
+                  profileUrl: contact.profileUrl,
+                  platform: contact.platform,
+                  sourceUrl: contact.sourceUrl,
+                  sourceNote: contact.sourceNote.slice(0, 500),
+                  confidence: contact.confidence,
+                  lastVerifiedAt: new Date(),
+                })
+                .run();
+              contactIds.push(cid);
+              contactsFound += 1;
+            }
+
+            let matchedSkills: string[] = [];
+            try {
+              const parsed = JSON.parse(job.matchedSkillsJson) as unknown;
+              if (Array.isArray(parsed)) matchedSkills = parsed.filter((s): s is string => typeof s === 'string');
+            } catch {
+              matchedSkills = [];
+            }
+
+            const proposals = await generateGroundedDraftProposals(
+              rawJob,
+              matchedSkills,
+              discovery.contacts,
+              profile,
+              ollamaOpts,
+              job.matchScore,
+              { skipFallbackIfNoContacts: true },
+            );
+
+            for (const proposal of proposals) {
+              const linkedContactId =
+                proposal.contactIndex !== null && contactIds[proposal.contactIndex]
+                  ? contactIds[proposal.contactIndex]
+                  : null;
+              db.insert(outreachDrafts)
+                .values({
+                  id: randomUUID(),
+                  userId,
+                  jobId: job.id,
+                  contactId: linkedContactId,
+                  companyName: job.companyName,
+                  roleTitle: job.title,
+                  channel: proposal.channel,
+                  recipientLabel: proposal.recipientLabel.slice(0, 160),
+                  recipientTarget: proposal.recipientTarget?.slice(0, 500) ?? null,
+                  subject: proposal.subject?.slice(0, 220) ?? null,
+                  body: proposal.body.slice(0, 4000),
+                  groundingFactsJson: JSON.stringify(proposal.groundingFacts),
+                  status: 'pending_review',
+                })
+                .run();
+              draftsCreated += 1;
+            }
+
+            pushLog(
+              'info',
+              `Backfill found ${discovery.contacts.length} real contact(s) at ${job.companyName} (${discovery.diagnostics.resolvedDomain || 'no domain'}) -> drafted ${proposals.length} direct message(s).`,
+            );
+          } else {
+            pushLog(
+              'info',
+              `Backfill checked ${job.companyName} (domain: ${discovery.diagnostics.resolvedDomain || 'unresolved'}, LinkedIn hits: ${discovery.diagnostics.linkedinHitsReturned}, rejected: ${discovery.diagnostics.linkedinRejected}, GitHub: ${discovery.diagnostics.githubMembersFound}).`,
+            );
+          }
+        }
       }
     }
 
@@ -610,8 +850,8 @@ async function executeDiscoveryLoop(
     pushLog(
       'info',
       finalStatus === 'cancelled'
-        ? `Run stopped. Saved ${jobsMatched} target-role matches, ${contactsFound} real contacts, and ${draftsCreated} drafts.`
-        : `Research complete! Scanned ${jobsScanned} listings -> ${jobsMatched} strict matches, ${contactsFound} real contacts, ${draftsCreated} focused drafts.`,
+        ? `Run stopped. Saved ${jobsMatched} matches, ${contactsFound} verified current contacts, and ${draftsCreated} drafts.`
+        : `Research complete! All ${sourceTasks.length} sources + people-backfill finished: ${jobsScanned} scanned -> ${jobsMatched} strict matches, ${contactsFound} verified current contacts, ${draftsCreated} drafts.`,
       { stage: finalStatus },
     );
 
